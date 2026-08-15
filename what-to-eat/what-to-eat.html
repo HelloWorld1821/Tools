@@ -1,0 +1,629 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>今天吃什么</title>
+<style>
+  :root {
+    --bg1: #1e1b4b;
+    --bg2: #312e81;
+    --accent: #f59e0b;
+    --accent2: #fb7185;
+    --card: rgba(255, 255, 255, 0.06);
+    --card-border: rgba(255, 255, 255, 0.12);
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    min-height: 100vh;
+    font-family: "PingFang SC", "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
+    color: #fff;
+    background: radial-gradient(circle at 25% 15%, var(--bg2), var(--bg1) 70%);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 32px 16px 40px;
+    overflow-x: hidden;
+  }
+  .header { text-align: center; margin-bottom: 22px; }
+  .header h1 {
+    font-size: clamp(30px, 6vw, 48px);
+    font-weight: 800;
+    letter-spacing: 3px;
+    background: linear-gradient(90deg, var(--accent), var(--accent2));
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+  .header p {
+    margin-top: 8px;
+    font-size: 15px;
+    color: rgba(255, 255, 255, 0.55);
+    letter-spacing: 1px;
+  }
+  .result {
+    height: 42px;
+    margin-bottom: 20px;
+    font-size: clamp(18px, 4vw, 26px);
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0;
+    transform: translateY(8px);
+    transition: opacity .4s ease, transform .4s ease;
+    text-align: center;
+  }
+  .result.show { opacity: 1; transform: translateY(0); }
+  .result .food-name {
+    background: linear-gradient(90deg, var(--accent), var(--accent2));
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+    margin: 0 6px;
+  }
+
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 14px;
+    width: 100%;
+    max-width: 640px;
+    margin-bottom: 30px;
+  }
+  .cell {
+    position: relative;
+    aspect-ratio: 1 / 1;
+    background: var(--card);
+    border: 1.5px solid var(--card-border);
+    border-radius: 18px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    padding: 8px;
+    transition: transform .18s ease, box-shadow .18s ease, border-color .18s ease, background .18s ease;
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+    cursor: default;
+    user-select: none;
+  }
+  .cell:hover { transform: translateY(-3px); border-color: rgba(255,255,255,0.28); }
+  .cell .emoji { font-size: clamp(30px, 7vw, 44px); line-height: 1; }
+  .cell .name { font-size: clamp(13px, 3vw, 16px); color: rgba(255,255,255,0.82); font-weight: 600; }
+
+  .cell.active {
+    border-color: var(--accent);
+    background: rgba(245, 158, 11, 0.16);
+    box-shadow: 0 0 0 2px var(--accent), 0 0 24px rgba(245, 158, 11, 0.55);
+    transform: translateY(-3px) scale(1.06);
+    z-index: 2;
+  }
+  .cell.winner {
+    border-color: var(--accent2);
+    background: rgba(251, 113, 133, 0.18);
+    box-shadow: 0 0 0 2px var(--accent2), 0 0 34px rgba(251, 113, 133, 0.7);
+    z-index: 3;
+    transform: scale(1.1);
+    animation: pop 0.6s ease;
+  }
+  @keyframes pop {
+    0%   { transform: scale(1.06); }
+    40%  { transform: scale(1.22); }
+    100% { transform: scale(1.1); }
+  }
+  /* 编辑模式下的删除角标 */
+  .cell .del {
+    position: absolute;
+    top: -8px;
+    right: -8px;
+    width: 26px;
+    height: 26px;
+    border-radius: 50%;
+    border: none;
+    background: #ef4444;
+    color: #fff;
+    font-size: 16px;
+    font-weight: 700;
+    line-height: 1;
+    cursor: pointer;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 3px 10px rgba(0,0,0,0.35);
+    z-index: 4;
+  }
+  .cell .del:hover { background: #dc2626; transform: scale(1.12); }
+  body.editing .cell .del { display: flex; }
+  body.editing .cell { animation: wobble 0.4s ease infinite alternate; }
+  body.editing .cell:hover { transform: none; }
+  @keyframes wobble {
+    from { transform: rotate(-1deg); }
+    to   { transform: rotate(1deg); }
+  }
+
+  /* 按钮区 */
+  .controls {
+    display: flex;
+    gap: 14px;
+    align-items: center;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+  .btn {
+    border: none;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 20px;
+    font-weight: 800;
+    letter-spacing: 2px;
+    color: #1e1b4b;
+    padding: 16px 52px;
+    border-radius: 999px;
+    background: linear-gradient(90deg, var(--accent), var(--accent2));
+    box-shadow: 0 10px 30px rgba(251, 113, 133, 0.4);
+    transition: transform .15s ease, box-shadow .15s ease, opacity .2s ease;
+  }
+  .btn:hover:not(:disabled) { transform: translateY(-2px); box-shadow: 0 14px 38px rgba(251, 113, 133, 0.55); }
+  .btn:active:not(:disabled) { transform: translateY(1px); }
+  .btn:disabled { cursor: not-allowed; opacity: .6; filter: saturate(.7); }
+
+  .btn.ghost {
+    background: rgba(255,255,255,0.08);
+    color: #fff;
+    border: 1.5px solid var(--card-border);
+    box-shadow: none;
+    font-size: 16px;
+    letter-spacing: 1px;
+    padding: 14px 28px;
+  }
+  .btn.ghost:hover:not(:disabled) { background: rgba(255,255,255,0.16); box-shadow: none; transform: translateY(-2px); }
+  /* 编辑面板 */
+  .editor {
+    width: 100%;
+    max-width: 640px;
+    margin-bottom: 30px;
+    background: rgba(255,255,255,0.04);
+    border: 1.5px solid var(--card-border);
+    border-radius: 20px;
+    padding: 20px;
+    display: none;
+  }
+  body.editing .editor { display: block; }
+  .editor h3 {
+    font-size: 15px;
+    font-weight: 700;
+    color: rgba(255,255,255,0.75);
+    margin-bottom: 12px;
+    letter-spacing: 1px;
+  }
+  .editor h3:not(:first-child) { margin-top: 22px; }
+
+  .add-row { display: flex; gap: 10px; flex-wrap: wrap; }
+  .add-row input {
+    font-family: inherit;
+    font-size: 15px;
+    color: #fff;
+    background: rgba(0,0,0,0.25);
+    border: 1.5px solid var(--card-border);
+    border-radius: 12px;
+    padding: 12px 14px;
+    outline: none;
+    transition: border-color .15s ease;
+  }
+  .add-row input:focus { border-color: var(--accent); }
+  .add-row input.emoji-in { width: 72px; text-align: center; font-size: 22px; }
+  .add-row input.name-in { flex: 1; min-width: 120px; }
+  .add-row .btn.add {
+    font-size: 15px;
+    letter-spacing: 1px;
+    padding: 12px 24px;
+  }
+
+  .palette {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(84px, 1fr));
+    gap: 10px;
+    max-height: 320px;
+    overflow-y: auto;
+    padding: 4px 4px 4px 0;
+  }
+  .chip {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    padding: 10px 4px;
+    border-radius: 14px;
+    background: rgba(255,255,255,0.05);
+    border: 1.5px solid var(--card-border);
+    cursor: pointer;
+    transition: transform .12s ease, background .12s ease, border-color .12s ease;
+    user-select: none;
+  }
+  .chip:hover { background: rgba(255,255,255,0.12); transform: translateY(-2px); }
+  .chip .c-emoji { font-size: 26px; line-height: 1; }
+  .chip .c-name { font-size: 12px; color: rgba(255,255,255,0.7); }
+  .chip.added {
+    border-color: rgba(52, 211, 153, 0.6);
+    background: rgba(52, 211, 153, 0.12);
+    cursor: default;
+  }
+  .chip.added .c-name::after { content: " ✓"; color: #34d399; }
+  .chip.added:hover { transform: none; }
+
+  .editor .tip { font-size: 13px; color: rgba(255,255,255,0.45); margin-top: 6px; }
+
+  @media (max-width: 560px) {
+    .grid { grid-template-columns: repeat(3, 1fr); gap: 10px; }
+    .btn { padding: 14px 36px; font-size: 18px; }
+  }
+
+  /* 撒花彩带 */
+  .confetti {
+    position: fixed;
+    top: -12px;
+    width: 9px;
+    height: 14px;
+    border-radius: 2px;
+    pointer-events: none;
+    z-index: 50;
+    opacity: 0;
+  }
+  @keyframes fall {
+    0%   { transform: translateY(0) rotateZ(0deg); opacity: 1; }
+    100% { transform: translateY(105vh) rotateZ(720deg); opacity: 1; }
+  }
+</style>
+</head>
+<body>
+  <div class="header">
+    <h1>今天吃什么</h1>
+    <p>选择困难症救星 · 点一下交给命运</p>
+  </div>
+
+  <div class="result" id="result"></div>
+
+  <div class="grid" id="grid"></div>
+
+  <div class="editor" id="editor">
+    <h3>➕ 自定义添加</h3>
+    <div class="add-row">
+      <input class="emoji-in" id="emojiIn" maxlength="4" placeholder="🍩" title="图标（emoji）">
+      <input class="name-in" id="nameIn" maxlength="10" placeholder="输入食物名称，回车添加">
+      <button class="btn add" id="addBtn">添加</button>
+    </div>
+    <p class="tip">图标可留空，会自动用 🍽️ 占位。列表已自动保存到本地浏览器。</p>
+
+    <h3>🍱 从备选库里挑（点一下即可加入）</h3>
+    <div class="palette" id="palette"></div>
+  </div>
+
+  <div class="controls">
+    <button class="btn" id="startBtn">开始！</button>
+    <button class="btn ghost" id="editBtn">✏️ 编辑</button>
+    <button class="btn ghost" id="resetBtn" style="display:none">↺ 恢复默认</button>
+  </div>
+
+<script>
+  // 默认食物（首次打开时使用）
+  const DEFAULT_FOODS = [
+    { emoji: "🍲", name: "火锅" },
+    { emoji: "🍔", name: "汉堡" },
+    { emoji: "🍣", name: "寿司" },
+    { emoji: "🥟", name: "饺子" },
+    { emoji: "🍜", name: "拉面" },
+    { emoji: "🍕", name: "披萨" },
+    { emoji: "🥗", name: "沙拉" },
+    { emoji: "🍖", name: "烤肉" },
+    { emoji: "🍚", name: "盖饭" },
+    { emoji: "🍝", name: "炒面" },
+    { emoji: "🍛", name: "咖喱" },
+    { emoji: "🌶️", name: "麻辣烫" }
+  ];
+
+  // 备选食物库 —— 编辑模式里点一下即可加入
+  const PALETTE = [
+    { emoji: "🍚", name: "米饭" },
+    { emoji: "🍛", name: "咖喱饭" },
+    { emoji: "🍜", name: "拉面" },
+    { emoji: "🍲", name: "火锅" },
+    { emoji: "🍢", name: "关东煮" },
+    { emoji: "🌶️", name: "麻辣烫" },
+    { emoji: "🍝", name: "意面" },
+    { emoji: "🥘", name: "烩饭" },
+    { emoji: "🍳", name: "煎蛋" },
+    { emoji: "🥚", name: "卤蛋" },
+    { emoji: "🥟", name: "饺子" },
+    { emoji: "🥠", name: "馄饨" },
+    { emoji: "🫓", name: "馅饼" },
+    { emoji: "🥧", name: "派" },
+    { emoji: "🍕", name: "披萨" },
+    { emoji: "🍔", name: "汉堡" },
+    { emoji: "🌭", name: "热狗" },
+    { emoji: "🥪", name: "三明治" },
+    { emoji: "🌮", name: "塔可" },
+    { emoji: "🌯", name: "卷饼" },
+    { emoji: "🥙", name: "皮塔卷" },
+    { emoji: "🧆", name: "沙拉三角" },
+    { emoji: "🍟", name: "薯条" },
+    { emoji: "🍗", name: "炸鸡" },
+    { emoji: "🍖", name: "烤肉" },
+    { emoji: "🥩", name: "牛排" },
+    { emoji: "🥓", name: "培根" },
+    { emoji: "🍤", name: "炸虾" },
+    { emoji: "🦞", name: "龙虾" },
+    { emoji: "🦀", name: "螃蟹" },
+    { emoji: "🦐", name: "小龙虾" },
+    { emoji: "🦑", name: "鱿鱼" },
+    { emoji: "🐟", name: "烤鱼" },
+    { emoji: "🍣", name: "寿司" },
+    { emoji: "🍱", name: "便当" },
+    { emoji: "🍙", name: "饭团" },
+    { emoji: "🍘", name: "米饼" },
+    { emoji: "🥮", name: "月饼" },
+    { emoji: "🍠", name: "烤红薯" },
+    { emoji: "🥔", name: "土豆" },
+    { emoji: "🌽", name: "玉米" },
+    { emoji: "🥗", name: "沙拉" },
+    { emoji: "🥦", name: "西兰花" },
+    { emoji: "🍅", name: "番茄" },
+    { emoji: "🍄", name: "菌菇" },
+    { emoji: "🧀", name: "芝士" },
+    { emoji: "🥯", name: "贝果" },
+    { emoji: "🥐", name: "可颂" },
+    { emoji: "🍞", name: "面包" },
+    { emoji: "🥖", name: "法棍" },
+    { emoji: "🥨", name: "扭结饼" },
+    { emoji: "🫔", name: "粽子" },
+    { emoji: "🍥", name: "鱼板面" },
+    { emoji: "🍡", name: "团子" },
+    { emoji: "🍧", name: "刨冰" },
+    { emoji: "🍨", name: "冰淇淋" },
+    { emoji: "🍦", name: "甜筒" },
+    { emoji: "🍰", name: "蛋糕" },
+    { emoji: "🎂", name: "生日蛋糕" },
+    { emoji: "🧁", name: "纸杯蛋糕" },
+    { emoji: "🍮", name: "布丁" },
+    { emoji: "🍩", name: "甜甜圈" },
+    { emoji: "🍪", name: "曲奇" },
+    { emoji: "🍫", name: "巧克力" },
+    { emoji: "🍬", name: "糖果" },
+    { emoji: "🥞", name: "松饼" },
+    { emoji: "🧇", name: "华夫饼" },
+    { emoji: "🍵", name: "茶" },
+    { emoji: "🧋", name: "奶茶" },
+    { emoji: "☕", name: "咖啡" },
+    { emoji: "🥤", name: "汽水" },
+    { emoji: "🧃", name: "果汁" },
+    { emoji: "🍺", name: "啤酒" },
+    { emoji: "🍜", name: "米线" },
+    { emoji: "🍢", name: "串串" },
+    { emoji: "🥣", name: "粥" },
+    { emoji: "🍏", name: "水果" }
+  ];
+  const STORAGE_KEY = "whatToEat.foods.v1";
+
+  const grid = document.getElementById("grid");
+  const editor = document.getElementById("editor");
+  const palette = document.getElementById("palette");
+  const startBtn = document.getElementById("startBtn");
+  const editBtn = document.getElementById("editBtn");
+  const resetBtn = document.getElementById("resetBtn");
+  const addBtn = document.getElementById("addBtn");
+  const emojiIn = document.getElementById("emojiIn");
+  const nameIn = document.getElementById("nameIn");
+  const result = document.getElementById("result");
+
+  let foods = loadFoods();
+  let cells = [];
+  let spinning = false;
+  let editing = false;
+
+  function loadFoods() {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed) && parsed.length) return parsed;
+      }
+    } catch (e) { /* 忽略损坏数据 */ }
+    return DEFAULT_FOODS.slice();
+  }
+
+  function saveFoods() {
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(foods)); } catch (e) {}
+  }
+
+  // 渲染食物网格
+  function renderGrid() {
+    grid.innerHTML = "";
+    cells = foods.map((food, i) => {
+      const cell = document.createElement("div");
+      cell.className = "cell";
+      cell.dataset.index = i;
+      cell.innerHTML =
+        `<span class="emoji">${food.emoji}</span>` +
+        `<span class="name">${food.name}</span>` +
+        `<button class="del" title="删除" aria-label="删除">×</button>`;
+      cell.querySelector(".del").addEventListener("click", (e) => {
+        e.stopPropagation();
+        removeFood(i);
+      });
+      grid.appendChild(cell);
+      return cell;
+    });
+  }
+
+  // 渲染备选库
+  function renderPalette() {
+    palette.innerHTML = "";
+    PALETTE.forEach(item => {
+      const chip = document.createElement("div");
+      chip.className = "chip";
+      chip.innerHTML = `<span class="c-emoji">${item.emoji}</span><span class="c-name">${item.name}</span>`;
+      chip.addEventListener("click", () => {
+        if (hasFood(item.name)) return;
+        foods.push({ emoji: item.emoji, name: item.name });
+        saveFoods();
+        renderGrid();
+        refreshPaletteState();
+      });
+      palette.appendChild(chip);
+    });
+    refreshPaletteState();
+  }
+
+  // 已加入的备选打勾、禁用
+  function refreshPaletteState() {
+    Array.from(palette.children).forEach((chip, idx) => {
+      const item = PALETTE[idx];
+      if (hasFood(item.name)) chip.classList.add("added");
+      else chip.classList.remove("added");
+    });
+  }
+
+  function hasFood(name) {
+    return foods.some(f => f.name === name);
+  }
+
+  function removeFood(index) {
+    if (foods.length <= 1) {
+      alert("至少要保留一种食物哦～");
+      return;
+    }
+    foods.splice(index, 1);
+    saveFoods();
+    renderGrid();
+    refreshPaletteState();
+  }
+
+  function addCustom() {
+    const name = nameIn.value.trim();
+    if (!name) { nameIn.focus(); return; }
+    if (hasFood(name)) {
+      alert("已经有这个食物啦～");
+      nameIn.select();
+      return;
+    }
+    const emoji = emojiIn.value.trim() || "🍽️";
+    foods.push({ emoji, name });
+    saveFoods();
+    renderGrid();
+    refreshPaletteState();
+    emojiIn.value = "";
+    nameIn.value = "";
+    nameIn.focus();
+  }
+  // 编辑模式切换
+  function setEditing(on) {
+    editing = on;
+    document.body.classList.toggle("editing", on);
+    editBtn.textContent = on ? "✅ 完成" : "✏️ 编辑";
+    resetBtn.style.display = on ? "" : "none";
+    startBtn.disabled = on || spinning;
+    if (on) {
+      result.classList.remove("show");
+      clearMarks();
+      refreshPaletteState();
+    }
+  }
+
+  function resetFoods() {
+    if (!confirm("确定恢复成默认食物列表吗？当前的自定义会被清空。")) return;
+    foods = DEFAULT_FOODS.slice();
+    saveFoods();
+    renderGrid();
+    refreshPaletteState();
+  }
+
+  function clearMarks() {
+    cells.forEach(c => c.classList.remove("active", "winner"));
+  }
+
+  // 跑马灯抽奖
+  function spin() {
+    if (spinning || editing) return;
+    spinning = true;
+    startBtn.disabled = true;
+    editBtn.disabled = true;
+    startBtn.textContent = "选择中…";
+    result.classList.remove("show");
+    clearMarks();
+
+    const n = cells.length;
+    const winner = Math.floor(Math.random() * n);
+    const extraLoops = 2 + Math.floor(Math.random() * 2);
+    // 从 0 出发，走 totalSteps 步后停在 winner
+    const totalSteps = extraLoops * n + ((winner % n) + n) % n + n;
+
+    let step = 0;
+    let current = -1;
+
+    function tick() {
+      if (current >= 0) cells[current].classList.remove("active");
+      current = step % n;
+      cells[current].classList.add("active");
+
+      step++;
+      if (step > totalSteps) {
+        finish(current);
+        return;
+      }
+      const progress = step / totalSteps;
+      const delay = 55 + Math.pow(progress, 2.6) * 380;
+      setTimeout(tick, delay);
+    }
+    tick();
+  }
+
+  function finish(index) {
+    const cell = cells[index];
+    cell.classList.remove("active");
+    cell.classList.add("winner");
+
+    const food = foods[index];
+    result.innerHTML = `今天吃 <span class="food-name">${food.emoji} ${food.name}</span> 吧！`;
+    result.classList.add("show");
+    launchConfetti();
+
+    spinning = false;
+    startBtn.disabled = false;
+    editBtn.disabled = false;
+    startBtn.textContent = "再来一次";
+  }
+
+  function launchConfetti() {
+    const colors = ["#f59e0b", "#fb7185", "#a78bfa", "#34d399", "#60a5fa", "#fbbf24"];
+    for (let i = 0; i < 60; i++) {
+      const c = document.createElement("div");
+      c.className = "confetti";
+      c.style.left = Math.random() * 100 + "vw";
+      c.style.background = colors[Math.floor(Math.random() * colors.length)];
+      const duration = 1.8 + Math.random() * 1.4;
+      const delay = Math.random() * 0.5;
+      c.style.animation = `fall ${duration}s linear ${delay}s forwards`;
+      document.body.appendChild(c);
+      setTimeout(() => c.remove(), (duration + delay) * 1000 + 100);
+    }
+  }
+
+  // 事件绑定
+  startBtn.addEventListener("click", spin);
+  editBtn.addEventListener("click", () => setEditing(!editing));
+  resetBtn.addEventListener("click", resetFoods);
+  addBtn.addEventListener("click", addCustom);
+  nameIn.addEventListener("keydown", (e) => { if (e.key === "Enter") addCustom(); });
+  emojiIn.addEventListener("keydown", (e) => { if (e.key === "Enter") nameIn.focus(); });
+
+  // 初始化
+  renderGrid();
+  renderPalette();
+</script>
+</body>
+</html>
+
+
+
