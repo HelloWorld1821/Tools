@@ -257,7 +257,7 @@
   .editor .tip { font-size: 13px; color: rgba(255,255,255,0.45); margin-top: 6px; }
 
   @media (max-width: 560px) {
-    .grid { grid-template-columns: repeat(3, 1fr); gap: 10px; }
+    .grid { gap: 10px; }
     .btn { padding: 14px 36px; font-size: 18px; }
   }
 
@@ -440,6 +440,11 @@
   // 渲染食物网格
   function renderGrid() {
     grid.innerHTML = "";
+    // 最多四行：列数 = ceil(数量 / 4)，最少 4 列。超过 16 个自动加列而不加行。
+    const cols = Math.max(4, Math.ceil(foods.length / 4));
+    grid.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
+    // 列数超过 4 时同步放宽宽度，让格子保持大小、只是往两侧扩展
+    grid.style.maxWidth = (cols * 160) + "px";
     cells = foods.map((food, i) => {
       const cell = document.createElement("div");
       cell.className = "cell";
