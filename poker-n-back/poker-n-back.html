@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <title>扑克牌双重 N-back</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="page-shell">
+    <header class="site-header">
+      <a class="brand" href="#" aria-label="扑克牌双重 N-back 首页">
+        <span class="brand-mark" aria-hidden="true">♠</span>
+        <span>
+          <strong>扑克牌双重 N-back</strong>
+          <small>专注记忆训练</small>
+        </span>
+      </a>
+      <span class="header-note">每张牌 4 秒</span>
+    </header>
+
+    <main>
+      <section id="setup-view" class="view setup-view" aria-labelledby="setup-title">
+        <div class="intro-block">
+          <p class="eyebrow">Memory training</p>
+          <h1 id="setup-title">保持专注，记住间隔。</h1>
+          <p class="intro-copy">比较当前牌与前第 N 张牌，判断它们的花色或点数关系。</p>
+        </div>
+
+        <div class="panel setup-panel">
+          <form id="setup-form" novalidate>
+            <div class="field-grid">
+              <div class="field">
+                <label for="total-cards">每局总牌数</label>
+                <input id="total-cards" name="totalCards" type="number" min="2" max="100" step="1" value="10" inputmode="numeric" aria-describedby="total-cards-error">
+                <p id="total-cards-error" class="field-error" aria-live="polite"></p>
+              </div>
+              <div class="field">
+                <label for="n-value">N 的大小</label>
+                <input id="n-value" name="n" type="number" min="1" step="1" value="2" inputmode="numeric" aria-describedby="n-value-error">
+                <p id="n-value-error" class="field-error" aria-live="polite"></p>
+              </div>
+            </div>
+
+            <div id="rules-summary" class="rules-summary">
+              <span class="rules-icon" aria-hidden="true">◎</span>
+              <p>前 <strong>2</strong> 张只需记忆；从第 <strong>3</strong> 张开始判断。</p>
+            </div>
+
+            <div class="rule-legend" aria-label="判断规则">
+              <span><kbd>A</kbd> 花色相同</span>
+              <span><kbd>B</kbd> 点数相同</span>
+              <span><kbd>C</kbd> 都不相同</span>
+            </div>
+
+            <button id="start-button" class="primary-button" type="submit">开始训练</button>
+          </form>
+        </div>
+      </section>
+
+      <section id="play-view" class="view play-view" aria-labelledby="play-title" hidden>
+        <h1 id="play-title" class="visually-hidden">训练进行中</h1>
+        <div class="play-header">
+          <div>
+            <span class="meta-label">当前进度</span>
+            <p class="progress-copy"><strong id="current-index">1</strong> / <span id="total-count">10</span></p>
+          </div>
+          <div class="timer-copy">
+            <span class="meta-label">剩余时间</span>
+            <p><strong id="timer-value">4.0</strong> 秒</p>
+          </div>
+        </div>
+
+        <div class="timer-track" role="progressbar" aria-label="本张牌剩余时间" aria-valuemin="0" aria-valuemax="4000" aria-valuenow="4000">
+          <div id="timer-bar" class="timer-bar"></div>
+        </div>
+
+        <div class="stage-copy">
+          <span id="stage-badge" class="stage-badge">记忆阶段</span>
+          <p id="comparison-copy">记住这张牌，暂时无需判断</p>
+        </div>
+
+        <div class="card-stage" aria-live="off">
+          <div id="playing-card" class="playing-card" role="img" aria-label="黑桃 A">
+            <div class="card-corner">
+              <span id="card-rank">A</span>
+              <span id="card-suit">♠</span>
+            </div>
+            <span id="card-suit-large" class="card-suit-large" aria-hidden="true">♠</span>
+            <div class="card-corner card-corner-bottom" aria-hidden="true">
+              <span id="card-rank-bottom">A</span>
+              <span id="card-suit-bottom">♠</span>
+            </div>
+          </div>
+        </div>
+
+        <div id="feedback" class="feedback" role="status" aria-live="polite"></div>
+
+        <div class="answer-grid" aria-label="请选择判断结果">
+          <button id="answer-a" class="answer-button" type="button" data-answer="A" disabled>
+            <kbd>A</kbd><span>花色相同</span>
+          </button>
+          <button id="answer-b" class="answer-button" type="button" data-answer="B" disabled>
+            <kbd>B</kbd><span>点数相同</span>
+          </button>
+          <button id="answer-c" class="answer-button" type="button" data-answer="C" disabled>
+            <kbd>C</kbd><span>都不相同</span>
+          </button>
+        </div>
+        <p class="keyboard-hint">点击按钮，或直接按键盘 A / B / C</p>
+      </section>
+
+      <section id="results-view" class="view results-view" aria-labelledby="results-title" hidden>
+        <div class="results-heading">
+          <div>
+            <p class="eyebrow">Session complete</p>
+            <h1 id="results-title">本局训练完成</h1>
+          </div>
+          <div class="result-actions">
+            <button id="settings-button" class="secondary-button" type="button">修改设置</button>
+            <button id="replay-button" class="primary-button compact" type="button">再来一局</button>
+          </div>
+        </div>
+
+        <div class="score-panel panel">
+          <div>
+            <span class="meta-label">本局正确率</span>
+            <p id="accuracy-value" class="accuracy-value">0%</p>
+            <p id="score-detail" class="score-detail">0 / 0 次判断正确</p>
+          </div>
+          <div class="score-ring" aria-hidden="true"><span>✓</span></div>
+        </div>
+
+        <div class="records-panel panel">
+          <div class="records-heading">
+            <h2>逐牌对比记录</h2>
+            <p>包括记忆牌、作答和超时情况</p>
+          </div>
+          <div class="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">序号</th>
+                  <th scope="col">当前牌</th>
+                  <th scope="col">对比牌</th>
+                  <th scope="col">你的选择</th>
+                  <th scope="col">正确答案</th>
+                  <th scope="col">结果</th>
+                </tr>
+              </thead>
+              <tbody id="records-body"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <p id="live-region" class="visually-hidden" aria-live="polite"></p>
+
+  <script src="game-core.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
