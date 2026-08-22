@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>掷骰子</title>
+<style>
+  :root {
+    --bg1: #0f172a;
+    --bg2: #1e293b;
+    --accent: #38bdf8;
+    --accent2: #a78bfa;
+    --card: rgba(255, 255, 255, 0.06);
+    --card-border: rgba(255, 255, 255, 0.12);
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { color-scheme: dark; }
+  html, body { height: 100%; }
+  body {
+    min-height: 100vh;
+    font-family: "PingFang SC", "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
+    color: #fff;
+    background: radial-gradient(circle at 25% 15%, var(--bg2), var(--bg1) 70%);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 32px 16px 40px;
+    overflow-x: hidden;
+  }
+  .header { text-align: center; margin-bottom: 22px; }
+  .header h1 {
+    font-size: clamp(30px, 6vw, 48px);
+    font-weight: 800;
+    letter-spacing: 3px;
+    background: linear-gradient(90deg, var(--accent), var(--accent2));
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+  .header p {
+    margin-top: 8px;
+    font-size: 15px;
+    color: rgba(255, 255, 255, 0.55);
+    letter-spacing: 1px;
+  }
+  /* 控制区 */
+  .controls-panel {
+    width: 100%;
+    max-width: 560px;
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+    margin-bottom: 22px;
+  }
+  .ctrl-row {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    align-items: center;
+  }
+  .ctrl-label {
+    font-size: 14px;
+    font-weight: 600;
+    letter-spacing: 1px;
+    color: rgba(255, 255, 255, 0.6);
+  }
+  .faces { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }
+  .face-btn {
+    font-family: inherit;
+    font-size: 15px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    color: rgba(255, 255, 255, 0.85);
+    background: var(--card);
+    border: 1.5px solid var(--card-border);
+    border-radius: 12px;
+    padding: 10px 16px;
+    cursor: pointer;
+    transition: transform .15s ease, border-color .15s ease, background .15s ease, box-shadow .15s ease;
+    user-select: none;
+  }
+  .face-btn:hover { transform: translateY(-2px); border-color: rgba(255,255,255,0.3); }
+  .face-btn.active {
+    border-color: var(--accent);
+    background: rgba(56, 189, 248, 0.16);
+    color: #fff;
+    box-shadow: 0 0 0 1px var(--accent), 0 0 18px rgba(56, 189, 248, 0.45);
+  }
+  .stepper { display: flex; align-items: center; gap: 16px; }
+  .step-btn {
+    width: 44px; height: 44px;
+    border-radius: 50%;
+    border: 1.5px solid var(--card-border);
+    background: var(--card);
+    color: #fff;
+    font-size: 24px; font-weight: 700; line-height: 1;
+    cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    transition: transform .15s ease, background .15s ease, border-color .15s ease, opacity .15s ease;
+    user-select: none;
+  }
+  .step-btn:hover:not(:disabled) { background: rgba(255,255,255,0.14); border-color: rgba(255,255,255,0.3); transform: translateY(-2px); }
+  .step-btn:active:not(:disabled) { transform: translateY(1px); }
+  .step-btn:disabled { opacity: .35; cursor: not-allowed; }
+  .count-val { min-width: 48px; text-align: center; font-size: 28px; font-weight: 800; font-variant-numeric: tabular-nums; }
+
+  /* 托盘（Three.js 画布容器） */
+  .tray {
+    position: relative;
+    width: 100%;
+    max-width: 560px;
+    aspect-ratio: 16 / 9;
+    margin-bottom: 22px;
+    border-radius: 26px;
+    overflow: hidden;
+    background:
+      radial-gradient(circle at 50% 28%, rgba(56,189,248,0.12), transparent 62%),
+      linear-gradient(160deg, #14532d, #0b3d22 55%, #072b17);
+    border: 3px solid rgba(255,255,255,0.10);
+    box-shadow:
+      inset 0 8px 26px rgba(0,0,0,0.6),
+      inset 0 -3px 10px rgba(255,255,255,0.05),
+      0 14px 34px rgba(0,0,0,0.45);
+  }
+  .tray canvas { position: absolute; inset: 0; width: 100% !important; height: 100% !important; display: block; }
+  .tray-hint {
+    position: absolute;
+    left: 0; right: 0; bottom: 12px;
+    text-align: center;
+    font-size: 13px;
+    color: rgba(255,255,255,0.45);
+    pointer-events: none;
+    transition: opacity .3s ease;
+  }
+
+  /* 结果区 */
+  .result {
+    height: 42px;
+    margin-bottom: 20px;
+    font-size: clamp(18px, 4vw, 26px);
+    font-weight: 700;
+    display: flex; align-items: center; justify-content: center;
+    opacity: 0; transform: translateY(8px);
+    transition: opacity .4s ease, transform .4s ease;
+    text-align: center;
+  }
+  .result.show { opacity: 1; transform: translateY(0); }
+  .result .total {
+    background: linear-gradient(90deg, var(--accent), var(--accent2));
+    -webkit-background-clip: text; background-clip: text;
+    -webkit-text-fill-color: transparent;
+    margin: 0 6px; font-size: 1.25em;
+  }
+
+  /* 按钮区 */
+  .actions {
+    display: flex; gap: 14px; align-items: center;
+    flex-wrap: wrap; justify-content: center; margin-bottom: 30px;
+  }
+  .btn {
+    border: none; cursor: pointer; font-family: inherit;
+    font-size: 20px; font-weight: 800; letter-spacing: 2px;
+    color: #0f172a; padding: 16px 52px; border-radius: 999px;
+    background: linear-gradient(90deg, var(--accent), var(--accent2));
+    box-shadow: 0 10px 30px rgba(56, 189, 248, 0.4);
+    transition: transform .15s ease, box-shadow .15s ease, opacity .2s ease;
+  }
+  .btn:hover:not(:disabled) { transform: translateY(-2px); box-shadow: 0 14px 38px rgba(56, 189, 248, 0.55); }
+  .btn:active:not(:disabled) { transform: translateY(1px); }
+  .btn:disabled { cursor: not-allowed; opacity: .6; filter: saturate(.7); }
+  .btn.ghost {
+    background: rgba(255,255,255,0.08); color: #fff;
+    border: 1.5px solid var(--card-border); box-shadow: none;
+    font-size: 16px; letter-spacing: 1px; padding: 14px 28px;
+  }
+  .btn.ghost:hover:not(:disabled) { background: rgba(255,255,255,0.16); box-shadow: none; transform: translateY(-2px); }
+
+  /* 历史记录 */
+  .history { width: 100%; max-width: 560px; display: none; }
+  .history.show { display: block; }
+  .history-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+  .history-head h3 { font-size: 15px; font-weight: 700; color: rgba(255,255,255,0.75); letter-spacing: 1px; }
+  .clear-btn {
+    font-family: inherit; font-size: 13px; color: rgba(255,255,255,0.6);
+    background: none; border: none; cursor: pointer;
+    text-decoration: underline; transition: color .15s ease;
+  }
+  .clear-btn:hover { color: #f87171; }
+  .history-list { display: flex; flex-direction: column; gap: 8px; }
+  .hist-item {
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    background: var(--card); border: 1.5px solid var(--card-border);
+    border-radius: 12px; padding: 10px 14px; font-size: 14px;
+  }
+  .hist-item .tag { flex-shrink: 0; font-weight: 700; color: var(--accent); font-variant-numeric: tabular-nums; }
+  .hist-item .rolls { flex: 1; color: rgba(255,255,255,0.7); word-break: break-word; text-align: center; font-variant-numeric: tabular-nums; }
+  .hist-item .sum { flex-shrink: 0; font-weight: 800; font-variant-numeric: tabular-nums; }
+  .hist-empty { text-align: center; color: rgba(255,255,255,0.4); font-size: 14px; padding: 16px 0; }
+
+  @media (max-width: 560px) {
+    .btn { padding: 14px 36px; font-size: 18px; }
+    .face-btn { padding: 9px 12px; font-size: 14px; }
+  }
+</style>
+</head>
+<body>
+  <div class="header">
+    <h1>🎲 掷骰子</h1>
+    <p>选面数 · 定数量 · 交给运气</p>
+  </div>
+
+  <div class="controls-panel">
+    <div class="ctrl-row">
+      <span class="ctrl-label">骰子面数</span>
+      <div class="faces" id="faces"></div>
+    </div>
+    <div class="ctrl-row">
+      <span class="ctrl-label">骰子数量</span>
+      <div class="stepper">
+        <button class="step-btn" id="minusBtn" aria-label="减少">−</button>
+        <span class="count-val" id="countVal">1</span>
+        <button class="step-btn" id="plusBtn" aria-label="增加">＋</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="tray" id="tray">
+    <div class="tray-hint" id="trayHint">拖动可旋转视角</div>
+  </div>
+
+  <div class="result" id="result"></div>
+
+  <div class="actions">
+    <button class="btn" id="rollBtn">🎲 掷骰子</button>
+    <button class="btn ghost" id="historyBtn">📜 历史</button>
+  </div>
+
+  <div class="history" id="history">
+    <div class="history-head">
+      <h3>📜 投掷历史</h3>
+      <button class="clear-btn" id="clearBtn">清空</button>
+    </div>
+    <div class="history-list" id="historyList"></div>
+  </div>
+
+  <script src="three.min.js"></script>
+  <script src="dice-3d.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
