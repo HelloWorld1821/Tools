@@ -14,16 +14,16 @@ tools/
 ├── what-to-eat/                # 「今天吃什么」网页（纯 HTML/CSS/JS）
 │   └── what-to-eat.html            # 单文件页面，双击即可打开
 ├── dice-roller/                # 「掷骰子」网页（HTML + Three.js 3D）
-    ├── dice-roller.html            # 页面结构与样式，双击即可打开
-    ├── app.js                      # 界面交互：面数/数量、历史记录、本地存储
-    ├── dice-3d.js                  # Three.js 3D 骰子引擎：多面体、贴图、投掷动画
-    └── three.min.js                # Three.js 库（随文件分发，离线可用）
-└── poker-n-back/              # 扑克牌双重 N-back 记忆训练网页
-    ├── poker-n-back.html          # 页面结构，双击即可打开
-    ├── styles.css                 # 专注训练主题、响应式与黑暗模式
-    ├── game-core.js               # 发牌、判断、计分与记录逻辑
-    ├── app.js                     # 计时、交互与页面状态控制
-    └── game-core.test.js          # 核心规则与页面契约测试
+│   ├── dice-roller.html            # 页面结构与样式，双击即可打开
+│   ├── app.js                      # 界面交互：面数/数量、历史记录、本地存储
+│   ├── dice-3d.js                  # Three.js 3D 骰子引擎：多面体、贴图、投掷动画
+│   └── three.min.js                # Three.js 库（随文件分发，离线可用）
+└── poker-n-back/               # 扑克牌双重 N-back 记忆训练网页
+    ├── poker-n-back.html           # 页面结构，双击即可打开
+    ├── styles.css                  # 专注训练主题、响应式与黑暗模式
+    ├── game-core.js                # 发牌、判断、计分与记录逻辑
+    ├── app.js                      # 计时、交互与页面状态控制
+    └── game-core.test.js           # 核心规则与页面契约测试
 ```
 
 ## Lucky Wheel
