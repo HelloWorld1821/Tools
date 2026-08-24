@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="按从小到大的顺序清除数字，训练注意力与节奏。">
+    <title>数字消除｜反应训练台</title>
+    <link rel="stylesheet" href="../assets/styles.css">
+    <style>
+      .number-grid { display: grid; grid-template-columns: repeat(var(--number-columns, 4), minmax(0, 1fr)); gap: clamp(6px, 1.2vh, 10px); margin-top: 12px; }
+      .number-cell { min-height: clamp(42px, 7vh, 54px); color: var(--paper); border: 1px solid var(--line); background: var(--panel); box-shadow: 0 3px 0 rgba(38, 71, 105, .08); font: 700 clamp(1rem, 3vw, 1.4rem)/1 var(--font-display, sans-serif); cursor: pointer; }
+      .number-cell:not(:disabled):hover { border-color: var(--cyan); background: var(--panel-raised); }
+      .number-cell--cleared { visibility: hidden; }
+      .number-cell--wrong { border-color: var(--signal); background: rgba(238, 117, 38, .16); animation: number-wrong .28s ease-in-out; }
+      @keyframes number-wrong { 50% { transform: translateX(-4px); } }
+      @media (max-width: 480px) { .number-grid { gap: 7px; } .number-cell { min-height: 45px; } }
+    </style>
+  </head>
+  <body class="game-page">
+    <main class="site-shell">
+      <header class="topbar">
+        <a class="brand" href="../index.html" aria-label="返回反应训练台首页">
+          <span class="brand-mark" aria-hidden="true">RT</span>
+          <span>反应训练台</span>
+        </a>
+        <p class="topbar-note"><span class="pulse-scale" aria-hidden="true"></span>顺序专注训练</p>
+      </header>
+
+      <section class="game-panel" aria-labelledby="number-title">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">SEQUENCING / NUMBER CLEAR</p>
+            <h1 id="number-title" class="game-title">数字消除</h1>
+          </div>
+          <p class="status-line">目标 <strong id="number-target">1</strong> · 用时 <strong id="number-time">00:00.00</strong></p>
+        </div>
+
+        <p id="number-live" class="status-line" role="status" aria-live="polite">选择棋盘大小，然后按从小到大的顺序清除数字。</p>
+
+        <div class="game-controls number-controls">
+          <label for="number-order">棋盘大小
+            <select id="number-order" class="game-select">
+              <option value="4" selected>4 × 4</option>
+              <option value="5">5 × 5</option>
+              <option value="6">6 × 6</option>
+            </select>
+          </label>
+          <button id="number-start" class="action-button action-button--number" type="button">开始训练</button>
+        </div>
+
+        <p id="number-instructions" class="sr-only">按从小到大的顺序选择数字。每个数字都是按钮，可用回车或空格键选择。</p>
+        <div id="number-grid" class="number-grid" role="group" aria-label="数字消除游戏区域" aria-describedby="number-instructions"></div>
+      </section>
+
+      <section id="number-result" class="result-panel" aria-labelledby="number-result-title" hidden>
+        <div>
+          <p class="eyebrow">ROUND COMPLETE</p>
+          <h2 id="number-result-title">本局完成</h2>
+        </div>
+        <div>
+          <p id="number-result-copy" class="hero-copy"></p>
+          <p id="number-best-record" class="best-record" role="status" aria-live="polite"></p>
+          <button id="number-replay" class="action-button action-button--number" type="button">再来一次</button>
+        </div>
+      </section>
+    </main>
+
+    <script src="../assets/common.js"></script>
+    <script src="number-clear-core.js"></script>
+    <script src="number-clear.js"></script>
+  </body>
+</html>

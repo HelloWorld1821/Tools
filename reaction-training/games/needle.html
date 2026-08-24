@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="在旋转圆盘的空隙中投下每一根针。">
+    <title>见缝插针｜反应训练台</title>
+    <link rel="stylesheet" href="../assets/styles.css">
+    <style>
+      .needle-canvas {
+        display: block;
+        width: min(100%, clamp(300px, calc(100svh - 270px), 430px));
+        aspect-ratio: 1;
+        height: auto;
+        margin: 10px auto;
+        touch-action: manipulation;
+      }
+
+      @media (max-width: 760px) {
+        .needle-canvas { width: min(100%, 560px); margin: 18px auto; }
+      }
+    </style>
+  </head>
+  <body class="game-page">
+    <main class="site-shell">
+      <header class="topbar">
+        <a class="brand" href="../index.html" aria-label="返回反应训练台首页">
+          <span class="brand-mark" aria-hidden="true">RT</span>
+          <span>反应训练台</span>
+        </a>
+        <p class="topbar-note"><span class="pulse-scale" aria-hidden="true"></span>瞄准训练</p>
+      </header>
+
+      <section class="game-panel" aria-labelledby="needle-title">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">TIMING / NEEDLE</p>
+            <h1 id="needle-title" class="game-title">见缝插针</h1>
+          </div>
+          <p class="status-line">得分 <strong id="needle-score">0</strong></p>
+        </div>
+
+        <p id="needle-live" class="status-line" role="status" aria-live="polite">按“开始训练”后，点击圆盘或按发射键投针。</p>
+
+        <canvas id="needle-canvas" class="game-surface needle-canvas" width="600" height="600" tabindex="0" aria-label="见缝插针游戏区域。运行时点击或按回车、空格键发射。"></canvas>
+
+        <div class="choice-row" aria-label="游戏操作">
+          <button id="needle-start" class="action-button" type="button">开始训练</button>
+          <button id="needle-fire" class="action-button" type="button" disabled>发射一针</button>
+        </div>
+      </section>
+
+      <section id="needle-result" class="result-panel" aria-labelledby="needle-result-title" hidden>
+        <div>
+          <p class="eyebrow">ROUND COMPLETE</p>
+          <h2 id="needle-result-title">本局结束</h2>
+        </div>
+        <div>
+          <p id="needle-result-copy" class="hero-copy"></p>
+          <p id="needle-best-record" class="best-record" role="status" aria-live="polite"></p>
+          <button id="needle-replay" class="action-button" type="button">再来一次</button>
+        </div>
+      </section>
+    </main>
+
+    <script src="../assets/common.js"></script>
+    <script src="needle-core.js"></script>
+    <script src="needle.js"></script>
+  </body>
+</html>

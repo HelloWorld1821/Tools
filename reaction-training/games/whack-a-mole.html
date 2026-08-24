@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="快速点击出现的地鼠，训练专注与反应。">
+    <title>打地鼠｜反应训练台</title>
+    <link rel="stylesheet" href="../assets/styles.css">
+    <style>
+      .mole-field { position: relative; height: clamp(300px, calc(100svh - 326px), 398px); margin: 12px 0 0; overflow: hidden; background: radial-gradient(circle at center, rgba(8, 127, 140, .08), transparent 56%), var(--panel); }
+      .mole-hole { position: absolute; width: 72px; height: 48px; border: 0; border-radius: 50%; background: #d9e4ec; box-shadow: inset 0 8px 0 rgba(93, 112, 135, .16), 0 0 0 2px var(--line); transform: translate(-50%, -50%); }
+      .mole-hole--active { background: var(--signal); box-shadow: 0 0 0 5px rgba(238, 117, 38, .22), 0 0 18px rgba(238, 117, 38, .5); cursor: pointer; }
+      .mole-hole--active::after { content: "●"; color: var(--paper); font-size: 1.4rem; }
+      .mole-controls { margin-top: 10px; }
+      .mole-miss-status { display: inline-flex; gap: 4px; color: inherit; transition: color 120ms ease; }
+      .mole-miss-status.is-alert { color: #b42318; font-weight: 900; }
+      .mole-feedback { min-height: 0; margin: 0; padding: 0 12px; overflow: hidden; color: #8d1d12; border: 0 solid #e5482d; background: #fff0ed; font-weight: 900; line-height: 0; opacity: 0; transform: translateY(-4px); transition: opacity 120ms ease, transform 120ms ease, padding 120ms ease, line-height 120ms ease, border-width 120ms ease; }
+      .mole-feedback.is-visible { margin-top: 8px; padding-block: 8px; border-width: 2px; line-height: 1.35; opacity: 1; transform: translateY(0); box-shadow: 0 5px 0 rgba(180, 35, 24, .12); }
+      .mole-field.is-missed { border-color: #e5482d; animation: miss-flash 260ms ease-out; }
+      @keyframes miss-flash { 50% { box-shadow: inset 0 0 42px rgba(229, 72, 45, .2), 0 0 0 5px rgba(229, 72, 45, .18); } }
+      @media (max-width: 760px) { .mole-field { height: auto; min-height: 360px; margin-top: 18px; } }
+      @media (max-width: 480px) { .mole-hole { width: 48px; height: 36px; } }
+    </style>
+  </head>
+  <body class="game-page">
+    <main class="site-shell">
+      <header class="topbar">
+        <a class="brand" href="../index.html" aria-label="返回反应训练台首页">
+          <span class="brand-mark" aria-hidden="true">RT</span>
+          <span>反应训练台</span>
+        </a>
+        <p class="topbar-note"><span class="pulse-scale" aria-hidden="true"></span>目标锁定训练</p>
+      </header>
+
+      <section class="game-panel" aria-labelledby="mole-title">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">TARGETING / MOLE</p>
+            <h1 id="mole-title" class="game-title">打地鼠</h1>
+          </div>
+          <p class="status-line">得分 <strong id="mole-score">0</strong> · <span id="mole-miss-status" class="mole-miss-status">漏掉 <strong id="mole-misses">0</strong>/3</span></p>
+        </div>
+
+        <p id="mole-live" class="status-line" role="status" aria-live="polite">选择地洞数量，然后开始训练。</p>
+        <p id="mole-feedback" class="mole-feedback" role="status" aria-live="assertive"></p>
+
+        <div class="game-controls mole-controls">
+          <label for="mole-count">地洞数量
+            <select id="mole-count" class="game-select">
+              <option value="6">6 个</option>
+              <option value="9" selected>9 个</option>
+              <option value="12">12 个</option>
+            </select>
+          </label>
+          <button id="mole-start" class="action-button action-button--mole" type="button">开始训练</button>
+        </div>
+
+        <p id="mole-instructions" class="sr-only">地鼠出现后会自动获得键盘焦点。按回车或空格键即可命中。</p>
+        <div id="mole-field" class="mole-field" role="group" aria-label="打地鼠游戏区域" aria-describedby="mole-instructions"></div>
+      </section>
+
+      <section id="mole-result" class="result-panel" aria-labelledby="mole-result-title" hidden>
+        <div>
+          <p class="eyebrow">ROUND COMPLETE</p>
+          <h2 id="mole-result-title">本局结束</h2>
+        </div>
+        <div>
+          <p id="mole-result-copy" class="hero-copy"></p>
+          <p id="mole-best-record" class="best-record" role="status" aria-live="polite"></p>
+          <button id="mole-replay" class="action-button action-button--mole" type="button">再来一次</button>
+        </div>
+      </section>
+    </main>
+
+    <script src="../assets/common.js"></script>
+    <script src="whack-a-mole-core.js"></script>
+    <script src="whack-a-mole.js"></script>
+  </body>
+</html>

@@ -18,12 +18,28 @@ tools/
 │   ├── app.js                      # 界面交互：面数/数量、历史记录、本地存储
 │   ├── dice-3d.js                  # Three.js 3D 骰子引擎：多面体、贴图、投掷动画
 │   └── three.min.js                # Three.js 库（随文件分发，离线可用）
-└── poker-n-back/               # 扑克牌双重 N-back 记忆训练网页
-    ├── poker-n-back.html           # 页面结构，双击即可打开
-    ├── styles.css                  # 专注训练主题、响应式与黑暗模式
-    ├── game-core.js                # 发牌、判断、计分与记录逻辑
-    ├── app.js                      # 计时、交互与页面状态控制
-    └── game-core.test.js           # 核心规则与页面契约测试
+├── poker-n-back/               # 扑克牌双重 N-back 记忆训练网页
+│   ├── poker-n-back.html           # 页面结构，双击即可打开
+│   ├── styles.css                  # 专注训练主题、响应式与黑暗模式
+│   ├── game-core.js                # 发牌、判断、计分与记录逻辑
+│   ├── app.js                      # 计时、交互与页面状态控制
+│   └── game-core.test.js           # 核心规则与页面契约测试
+└── reaction-training/          # 反应训练台：见缝插针/打地鼠/数字消除三合一网页
+    ├── index.html                  # 首页，展示三个训练项目入口
+    ├── assets/
+    │   ├── common.js                   # 共享工具：洗牌、计时格式化、本地存储读写、评级
+    │   └── styles.css                  # 共享样式，含浅色/黑暗模式
+    ├── games/
+    │   ├── needle.html                  # 见缝插针页面
+    │   ├── needle.js                    # 见缝插针交互逻辑
+    │   ├── needle-core.js               # 见缝插针核心规则
+    │   ├── whack-a-mole.html            # 打地鼠页面
+    │   ├── whack-a-mole.js              # 打地鼠交互逻辑
+    │   ├── whack-a-mole-core.js         # 打地鼠核心规则
+    │   ├── number-clear.html            # 数字消除页面
+    │   ├── number-clear.js              # 数字消除交互逻辑
+    │   └── number-clear-core.js         # 数字消除核心规则
+    └── tests/                       # 各核心逻辑与页面契约的单元测试
 ```
 
 ## Lucky Wheel
@@ -37,3 +53,6 @@ tools/
 
 ## poker double n-back
 一个可配置总牌数和 N 值的扑克牌双重 N-back 记忆训练网页，默认使用 10 张牌和 2-back。每张牌展示 4 秒，从第 N+1 张开始判断花色相同、点数相同或都不相同，错误与超时会显示正确答案，结束后给出正确率和逐牌记录。页面可直接双击离线运行，并会跟随系统自动切换浅色或黑暗模式。
+
+## reaction training
+一个反应训练台网页，从首页可进入见缝插针、打地鼠、数字消除三个短时反应训练项目。见缝插针要在旋转圆盘的空隙中点击投针，撞上已有针即结束；打地鼠要快速点击随机出现的目标；数字消除要按从小到大的顺序点完全部数字，三者都会记录成绩并给出对应评级。直接双击 index.html 即可离线打开，各页面共享 assets 下的样式与工具脚本，tests 目录提供核心规则与页面契约的单元测试。
