@@ -38,6 +38,48 @@
     }));
   }
 
+  function pickDifferent(values, excludedValue, random) {
+    const availableValues = values.filter((value) => value !== excludedValue);
+    return availableValues[Math.floor(random() * availableValues.length)];
+  }
+
+  function createCardForTarget(comparisonCard, target, random) {
+    if (target === 'A') {
+      return {
+        suit: comparisonCard.suit,
+        rank: pickDifferent(RANKS, comparisonCard.rank, random),
+      };
+    }
+    if (target === 'B') {
+      return {
+        suit: pickDifferent(SUITS, comparisonCard.suit, random),
+        rank: comparisonCard.rank,
+      };
+    }
+    return {
+      suit: pickDifferent(SUITS, comparisonCard.suit, random),
+      rank: pickDifferent(RANKS, comparisonCard.rank, random),
+    };
+  }
+
+  function generateBalancedCards(totalCards, n, random = Math.random) {
+    const targets = Array.from(
+      { length: totalCards - n },
+      (_, index) => ['A', 'B', 'C'][index % 3],
+    );
+    for (let index = targets.length - 1; index > 0; index -= 1) {
+      const swapIndex = Math.floor(random() * (index + 1));
+      [targets[index], targets[swapIndex]] = [targets[swapIndex], targets[index]];
+    }
+
+    const cards = generateCards(n, random);
+    for (let index = n; index < totalCards; index += 1) {
+      cards.push(createCardForTarget(cards[index - n], targets[index - n], random));
+    }
+
+    return { cards, targets };
+  }
+
   function getCorrectAnswers(current, previous) {
     const sameSuit = current.suit === previous.suit;
     const sameRank = current.rank === previous.rank;
@@ -103,6 +145,7 @@
     RANKS,
     validateConfig,
     generateCards,
+    generateBalancedCards,
     getCorrectAnswers,
     isAnswerCorrect,
     buildResults,

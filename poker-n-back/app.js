@@ -462,8 +462,8 @@
         n: validation.n,
       };
       lastAnnouncedCard = -1;
-      const cards = core.generateCards(currentConfig.totalCards);
-      controller.start({ cards, n: currentConfig.n });
+      const game = core.generateBalancedCards(currentConfig.totalCards, currentConfig.n);
+      controller.start({ cards: game.cards, n: currentConfig.n });
     }
 
     elements.setupForm.addEventListener('submit', (event) => {
@@ -495,10 +495,8 @@
 
     elements.replayButton.addEventListener('click', () => {
       lastAnnouncedCard = -1;
-      controller.start({
-        cards: core.generateCards(currentConfig.totalCards),
-        n: currentConfig.n,
-      });
+      const game = core.generateBalancedCards(currentConfig.totalCards, currentConfig.n);
+      controller.start({ cards: game.cards, n: currentConfig.n });
     });
 
     elements.settingsButton.addEventListener('click', () => {

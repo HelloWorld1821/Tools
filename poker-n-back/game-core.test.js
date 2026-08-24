@@ -79,6 +79,30 @@ test('generateCards creates independent standard cards', () => {
   ]);
 });
 
+test('generateBalancedCards balances A, B, and C N-back answers', () => {
+  const game = core.generateBalancedCards(10, 2, () => 0);
+  const answers = game.cards.slice(2).map((card, offset) =>
+    core.getCorrectAnswers(card, game.cards[offset]),
+  );
+  const counts = ['A', 'B', 'C'].map((answer) =>
+    answers.filter((correctAnswers) => correctAnswers[0] === answer).length,
+  );
+
+  assert.equal(game.cards.length, 10);
+  assert.equal(Math.max(...counts) - Math.min(...counts) <= 1, true);
+  assert.equal(answers.every((correctAnswers) => correctAnswers.length === 1), true);
+});
+
+test('generateBalancedCards keeps answer counts within one for uneven totals', () => {
+  const game = core.generateBalancedCards(11, 3, () => 0.4);
+  const answers = game.cards.slice(3).map((card, offset) =>
+    core.getCorrectAnswers(card, game.cards[offset])[0],
+  );
+  const counts = ['A', 'B', 'C'].map((answer) => answers.filter((value) => value === answer).length);
+
+  assert.equal(Math.max(...counts) - Math.min(...counts) <= 1, true);
+});
+
 test('getCorrectAnswers implements all comparison relationships', () => {
   assert.deepEqual(
     core.getCorrectAnswers(
