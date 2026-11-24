@@ -44,8 +44,10 @@ def system_theme() -> str:
 
 
 def fmt_duration(seconds) -> str:
-    if seconds is None:
+    if seconds is None or seconds <= 0:
         return ""
+    if seconds < 60:
+        return "<1分"
     seconds = int(seconds)
     d, rem = divmod(seconds, 86400)
     h, rem = divmod(rem, 3600)
@@ -86,6 +88,7 @@ class QuotaFloat:
         self.colors = THEMES[system_theme()]
         self.results: dict = {}
         self.fetching = False
+        self._status_text = "正在获取…"
 
         self.root = tk.Tk()
         self.root.title("Quota Float")
@@ -134,7 +137,7 @@ class QuotaFloat:
         self.topmost_var = tk.BooleanVar(value=bool(self.cfg["topmost"]))
         self.autostart_var = tk.BooleanVar(value=os.path.exists(startup_script_path()))
         menu = tk.Menu(self.root, tearoff=0)
-        menu.add_command(label="立即刷新", command=self.refresh)
+        menu.add_command(label="立即刷新", command=lambda: self.refresh(force=True))
         menu.add_checkbutton(label="窗口置顶", variable=self.topmost_var, command=self._toggle_topmost)
         if sys.platform == "win32":
             menu.add_checkbutton(label="开机自启", variable=self.autostart_var,
@@ -151,7 +154,7 @@ class QuotaFloat:
         widget.bind("<ButtonPress-1>", self._start_drag)
         widget.bind("<B1-Motion>", self._on_drag)
         widget.bind("<ButtonRelease-1>", self._end_drag)
-        widget.bind("<Double-Button-1>", lambda e: self.refresh())
+        widget.bind("<Double-Button-1>", lambda e: self.refresh(force=True))
         widget.bind("<Button-3>", lambda e: self.menu.tk_popup(e.x_root, e.y_root))
         for child in widget.winfo_children():
             self._bind_drag(child)
@@ -201,18 +204,18 @@ class QuotaFloat:
         self.root.destroy()
 
     # ---------------------------------------------------------- 数据
-    def refresh(self) -> None:
+    def refresh(self, force: bool = False) -> None:
         if self.fetching:
             return
         self.fetching = True
         self.status.configure(text="正在刷新…")
-        threading.Thread(target=self._fetch_all, daemon=True).start()
+        threading.Thread(target=self._fetch_all, args=(force,), daemon=True).start()
 
-    def _fetch_all(self) -> None:
+    def _fetch_all(self, force: bool = False) -> None:
         results = {}
         for provider_cls in PROVIDERS:
             try:
-                results[provider_cls.name] = provider_cls().fetch()
+                results[provider_cls.name] = provider_cls().fetch(force=force)
             except Exception as exc:  # noqa: BLE001 - 不让单个数据源拖垮界面
                 results[provider_cls.name] = ProviderResult(provider_cls.name, error=str(exc))
         self.root.after(0, self._apply, results)
@@ -226,7 +229,8 @@ class QuotaFloat:
                 old.error = res.error
                 continue
             self.results[name] = res
-        self.status.configure(text=f"更新于 {time.strftime('%H:%M')} · 双击刷新 · 右键菜单")
+        self._status_text = f"更新于 {time.strftime('%H:%M')} · 双击刷新 · 右键菜单"
+        self.status.configure(text=self._status_text)
         self._render()
 
     def _render(self) -> None:
@@ -252,9 +256,16 @@ class QuotaFloat:
             if res and res.error:
                 rows["title"].configure(text=f"{name} · ⚠")
                 self._tooltip(rows["title"], res.error)
+            else:
+                self._clear_tooltip(rows["title"])
 
     def _tooltip(self, widget: tk.Widget, message: str) -> None:
-        widget.bind("<Enter>", lambda e: self.status.configure(text=message[:60]))
+        widget.bind("<Enter>", lambda _e, msg=message: self.status.configure(text=msg[:60]))
+        widget.bind("<Leave>", lambda _e: self.status.configure(text=self._status_text))
+
+    def _clear_tooltip(self, widget: tk.Widget) -> None:
+        widget.unbind("<Enter>")
+        widget.unbind("<Leave>")
 
     def _tick(self) -> None:
         """每 30 秒刷新倒计时，按配置间隔重新拉取数据。"""
