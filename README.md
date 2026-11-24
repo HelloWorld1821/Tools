@@ -24,22 +24,26 @@ tools/
 │   ├── game-core.js                # 发牌、判断、计分与记录逻辑
 │   ├── app.js                      # 计时、交互与页面状态控制
 │   └── game-core.test.js           # 核心规则与页面契约测试
-└── reaction-training/          # 反应训练台：见缝插针/打地鼠/数字消除三合一网页
-    ├── index.html                  # 首页，展示三个训练项目入口
-    ├── assets/
-    │   ├── common.js                   # 共享工具：洗牌、计时格式化、本地存储读写、评级
-    │   └── styles.css                  # 共享样式，含浅色/黑暗模式
-    ├── games/
-    │   ├── needle.html                  # 见缝插针页面
-    │   ├── needle.js                    # 见缝插针交互逻辑
-    │   ├── needle-core.js               # 见缝插针核心规则
-    │   ├── whack-a-mole.html            # 打地鼠页面
-    │   ├── whack-a-mole.js              # 打地鼠交互逻辑
-    │   ├── whack-a-mole-core.js         # 打地鼠核心规则
-    │   ├── number-clear.html            # 数字消除页面
-    │   ├── number-clear.js              # 数字消除交互逻辑
-    │   └── number-clear-core.js         # 数字消除核心规则
-    └── tests/                       # 各核心逻辑与页面契约的单元测试
+├── reaction-training/          # 反应训练台：见缝插针/打地鼠/数字消除三合一网页
+│   ├── index.html                  # 首页，展示三个训练项目入口
+│   ├── assets/
+│   │   ├── common.js                   # 共享工具：洗牌、计时格式化、本地存储读写、评级
+│   │   └── styles.css                  # 共享样式，含浅色/黑暗模式
+│   ├── games/
+│   │   ├── needle.html                  # 见缝插针页面
+│   │   ├── needle.js                    # 见缝插针交互逻辑
+│   │   ├── needle-core.js               # 见缝插针核心规则
+│   │   ├── whack-a-mole.html            # 打地鼠页面
+│   │   ├── whack-a-mole.js              # 打地鼠交互逻辑
+│   │   ├── whack-a-mole-core.js         # 打地鼠核心规则
+│   │   ├── number-clear.html            # 数字消除页面
+│   │   ├── number-clear.js              # 数字消除交互逻辑
+│   │   └── number-clear-core.js         # 数字消除核心规则
+│   └── tests/                       # 各核心逻辑与页面契约的单元测试
+└── quota-float/              # 桌面半透明悬浮框：显示 Antigravity 与 Codex 的 5h/周剩余额度（Python + Tkinter）
+    ├── quota_float.pyw             # 主程序：无边框置顶悬浮窗、拖动、右键菜单、定时刷新
+    ├── providers.py                # 额度数据源：Codex 在线接口/本地会话日志、Antigravity 本地服务
+    └── test_providers.py           # 数据解析单元测试
 ```
 
 ## Lucky Wheel
@@ -56,3 +60,6 @@ tools/
 
 ## reaction training
 一个反应训练台网页，从首页可进入见缝插针、打地鼠、数字消除三个短时反应训练项目。见缝插针要在旋转圆盘的空隙中点击投针，撞上已有针即结束；打地鼠要快速点击随机出现的目标；数字消除要按从小到大的顺序点完全部数字，三者都会记录成绩并给出对应评级。
+
+## quota float
+一个基于 Tkinter 的桌面半透明悬浮框，双击 quota_float.pyw 启动后常驻屏幕右上角，用进度条显示 Antigravity 与 Codex 的 5h 额度和周额度剩余百分比及重置倒计时。Codex 额度优先通过 ~/.codex/auth.json 的登录态在线查询，失败时回退读取本地会话日志中的最新额度；Antigravity 额度从正在运行的 Antigravity 本地语言服务获取，因此需要先启动 Antigravity。悬浮框可左键拖动、双击立即刷新，右键菜单可切换置顶、调整不透明度和开机自启，颜色跟随系统浅色/深色主题。
