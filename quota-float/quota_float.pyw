@@ -1,4 +1,4 @@
-"""桌面半透明悬浮框：显示 Antigravity 与 Codex 的 5h / 周剩余额度。
+"""桌面半透明悬浮框：显示 Antigravity 与 Codex 的 5h/周额度及运行/待操作任务数。
 
 双击运行（.pyw 不弹控制台）。左键拖动，双击立即刷新，右键菜单可切换置顶、
 开机自启或退出。窗口位置保存在同目录的 config.json。
@@ -12,20 +12,28 @@ import sys
 import threading
 import time
 import tkinter as tk
+from typing import Optional
 
 from providers import PROVIDERS, ProviderResult
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(HERE, "config.json")
-DEFAULTS = {"x": None, "y": 80, "alpha": 0.82, "refresh_seconds": 120, "topmost": True}
+DEFAULTS = {
+    "x": None,
+    "y": 80,
+    "alpha": 0.82,
+    "refresh_seconds": 120,
+    "task_refresh_seconds": 5,
+    "topmost": True,
+}
 WINDOW_LABELS = (("5h", "5h"), ("week", "周"))
 BAR_W, BAR_H = 120, 6
 
 THEMES = {
     "dark": {"bg": "#1e1f24", "fg": "#e8e8ec", "sub": "#9a9ca6", "track": "#3a3c44",
-             "ok": "#4cc38a", "warn": "#f0b429", "bad": "#ef5a5a"},
+             "ok": "#4cc38a", "warn": "#f0b429", "bad": "#ef5a5a", "info": "#58a6ff"},
     "light": {"bg": "#f7f7f9", "fg": "#1f2328", "sub": "#5f6470", "track": "#d9dbe0",
-              "ok": "#1f8f55", "warn": "#b7791f", "bad": "#c53030"},
+              "ok": "#1f8f55", "warn": "#b7791f", "bad": "#c53030", "info": "#0969da"},
 }
 
 
@@ -86,8 +94,11 @@ class QuotaFloat:
     def __init__(self) -> None:
         self.cfg = load_config()
         self.colors = THEMES[system_theme()]
+        self.providers = [cls() for cls in PROVIDERS]
         self.results: dict = {}
+        self.tasks: dict = {}
         self.fetching = False
+        self.fetching_tasks = False
         self._status_text = "正在获取…"
 
         self.root = tk.Tk()
@@ -100,22 +111,24 @@ class QuotaFloat:
         self.frame = tk.Frame(self.root, bg=self.colors["bg"], padx=12, pady=8)
         self.frame.pack(fill="both", expand=True)
         self.rows: dict = {}
-        for r, provider in enumerate(PROVIDERS):
+        for r, provider in enumerate(self.providers):
             self._build_section(provider.name, r)
         self.status = tk.Label(self.frame, text="正在获取…", font=("Microsoft YaHei UI", 8),
                                bg=self.colors["bg"], fg=self.colors["sub"], anchor="w")
-        self.status.grid(row=len(PROVIDERS) * 3, column=0, columnspan=3, sticky="w", pady=(4, 0))
+        self.status.grid(row=len(self.providers) * 4, column=0, columnspan=3, sticky="w", pady=(4, 0))
 
         self._build_menu()
         self._bind_drag(self.root)
         self._place_window()
         self.refresh()
         self._tick()
+        task_ms = max(2, int(self.cfg.get("task_refresh_seconds", 5))) * 1000
+        self.root.after(task_ms, self._tick_tasks)
 
     # ---------------------------------------------------------- 布局
     def _build_section(self, name: str, index: int) -> None:
         c = self.colors
-        base = index * 3
+        base = index * 4
         title = tk.Label(self.frame, text=name, font=("Microsoft YaHei UI", 9, "bold"),
                          bg=c["bg"], fg=c["fg"], anchor="w")
         title.grid(row=base, column=0, columnspan=3, sticky="w", pady=(6 if index else 0, 2))
@@ -131,6 +144,20 @@ class QuotaFloat:
                             bg=c["bg"], fg=c["fg"], anchor="w")
             text.grid(row=r, column=2, sticky="w")
             rows[key] = (canvas, text)
+        tk.Label(self.frame, text="任务", width=3, font=("Microsoft YaHei UI", 8),
+                 bg=c["bg"], fg=c["sub"], anchor="w").grid(row=base + 3, column=0, sticky="w", pady=(2, 0))
+        task_box = tk.Frame(self.frame, bg=c["bg"])
+        task_box.grid(row=base + 3, column=1, columnspan=2, sticky="w", padx=(2, 0), pady=(2, 0))
+        run_lbl = tk.Label(task_box, text="--", font=("Microsoft YaHei UI", 8),
+                           bg=c["bg"], fg=c["sub"], anchor="w")
+        run_lbl.pack(side="left")
+        sep_lbl = tk.Label(task_box, text="", font=("Microsoft YaHei UI", 8),
+                           bg=c["bg"], fg=c["sub"], anchor="w")
+        sep_lbl.pack(side="left")
+        wait_lbl = tk.Label(task_box, text="", font=("Microsoft YaHei UI", 8),
+                            bg=c["bg"], fg=c["sub"], anchor="w")
+        wait_lbl.pack(side="left")
+        rows["task"] = (run_lbl, sep_lbl, wait_lbl)
         self.rows[name] = rows
 
     def _build_menu(self) -> None:
@@ -213,14 +240,19 @@ class QuotaFloat:
 
     def _fetch_all(self, force: bool = False) -> None:
         results = {}
-        for provider_cls in PROVIDERS:
+        tasks = {}
+        for prov in self.providers:
             try:
-                results[provider_cls.name] = provider_cls().fetch(force=force)
+                results[prov.name] = prov.fetch(force=force)
             except Exception as exc:  # noqa: BLE001 - 不让单个数据源拖垮界面
-                results[provider_cls.name] = ProviderResult(provider_cls.name, error=str(exc))
-        self.root.after(0, self._apply, results)
+                results[prov.name] = ProviderResult(prov.name, error=str(exc))
+            try:
+                tasks[prov.name] = prov.fetch_tasks()
+            except Exception:  # noqa: BLE001
+                tasks[prov.name] = None
+        self.root.after(0, self._apply, results, tasks)
 
-    def _apply(self, results: dict) -> None:
+    def _apply(self, results: dict, tasks: Optional[dict] = None) -> None:
         self.fetching = False
         for name, res in results.items():
             old = self.results.get(name)
@@ -229,9 +261,33 @@ class QuotaFloat:
                 old.error = res.error
                 continue
             self.results[name] = res
+        if tasks is not None:
+            self.tasks.update(tasks)
         self._status_text = f"更新于 {time.strftime('%H:%M')} · 双击刷新 · 右键菜单"
         self.status.configure(text=self._status_text)
         self._render()
+
+    def refresh_tasks(self) -> None:
+        if self.fetching_tasks or self.fetching:
+            return
+        self.fetching_tasks = True
+        threading.Thread(target=self._fetch_tasks, daemon=True).start()
+
+    def _fetch_tasks(self) -> None:
+        tasks = {}
+        for prov in self.providers:
+            try:
+                tasks[prov.name] = prov.fetch_tasks()
+            except Exception:  # noqa: BLE001
+                tasks[prov.name] = None
+        self.root.after(0, self._apply_tasks, tasks)
+
+    def _apply_tasks(self, tasks: dict) -> None:
+        self.fetching_tasks = False
+        changed = any(self.tasks.get(k) != v or k not in self.tasks for k, v in tasks.items())
+        if changed:
+            self.tasks.update(tasks)
+            self._render()
 
     def _render(self) -> None:
         c = self.colors
@@ -253,6 +309,25 @@ class QuotaFloat:
                 reset = fmt_duration(win.reset_in(now))
                 text.configure(text=f"{win.remaining:5.1f}%" + (f"  {reset}后重置" if reset else ""),
                                fg=c["fg"])
+            run_lbl, sep_lbl, wait_lbl = rows["task"]
+            ts = self.tasks.get(name)
+            if ts is None:
+                run_lbl.configure(text="--", fg=c["sub"], font=("Microsoft YaHei UI", 8))
+                sep_lbl.configure(text="")
+                wait_lbl.configure(text="")
+                self._clear_tooltip(wait_lbl)
+            else:
+                run_font = ("Microsoft YaHei UI", 8, "bold") if ts.running > 0 else ("Microsoft YaHei UI", 8)
+                wait_font = ("Microsoft YaHei UI", 8, "bold") if ts.waiting > 0 else ("Microsoft YaHei UI", 8)
+                run_lbl.configure(text=f"运行 {ts.running}",
+                                  fg=c["info"] if ts.running > 0 else c["sub"], font=run_font)
+                sep_lbl.configure(text="  ·  ", fg=c["sub"])
+                wait_lbl.configure(text=f"待操作 {ts.waiting}",
+                                   fg=c["warn"] if ts.waiting > 0 else c["sub"], font=wait_font)
+                if ts.waiting > 0 and ts.waiting_titles:
+                    self._tooltip(wait_lbl, "待操作: " + " / ".join(ts.waiting_titles))
+                else:
+                    self._clear_tooltip(wait_lbl)
             if res and res.error:
                 rows["title"].configure(text=f"{name} · ⚠")
                 self._tooltip(rows["title"], res.error)
@@ -275,6 +350,12 @@ class QuotaFloat:
             self._elapsed = 0
             self.refresh()
         self.root.after(30_000, self._tick)
+
+    def _tick_tasks(self) -> None:
+        """高频轮询本地任务运行与待操作状态。"""
+        self.refresh_tasks()
+        interval_ms = max(2, int(self.cfg.get("task_refresh_seconds", 5))) * 1000
+        self.root.after(interval_ms, self._tick_tasks)
 
     def run(self) -> None:
         self.root.mainloop()

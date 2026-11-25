@@ -1,12 +1,14 @@
 """额度数据源：Antigravity (Gemini) 与 Codex。
 
 每个 provider 的 fetch(force=False) 返回 ProviderResult，其中 windows 形如
-{"5h": Window, "week": Window}，缺失的窗口表示暂未取到。
+{"5h": Window, "week": Window}，缺失的窗口表示暂未取到；
+fetch_tasks() 返回 TaskStats（运行中/待操作任务数），无法获取时返回 None。
 仅依赖标准库，所有网络/进程访问都只针对本机用户自己的账号与进程。
 """
 
 from __future__ import annotations
 
+import csv
 import glob
 import http.client
 import json
@@ -17,6 +19,7 @@ import socket
 import ssl
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -28,6 +31,10 @@ FIVE_HOURS = 5 * 3600
 ONE_WEEK = 7 * 24 * 3600
 HTTP_TIMEOUT = 8
 LOCAL_HTTP_TIMEOUT = 4
+LOCAL_TASK_TIMEOUT = 6
+CODEX_RUNNING_MAX_AGE = 600
+CODEX_WAITING_MAX_AGE = 3600
+AGY_DISCOVER_COOLDOWN = 15
 AGY_SERVICE = "/exa.language_server_pb.LanguageServerService/"
 
 _NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0  # CREATE_NO_WINDOW
@@ -51,6 +58,13 @@ class ProviderResult:
     source: str = ""
     error: str = ""
     updated_at: float = field(default_factory=time.time)
+
+
+@dataclass
+class TaskStats:
+    running: int = 0
+    waiting: int = 0
+    waiting_titles: list[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------- 工具函数
@@ -145,7 +159,8 @@ def _http_json(url: str, headers: dict, body: Optional[bytes] = None,
 
 
 def _local_http_json(url: str, headers: dict, body: Optional[bytes] = None,
-                     context: Optional[ssl.SSLContext] = None) -> Any:
+                     context: Optional[ssl.SSLContext] = None,
+                     timeout: float = LOCAL_HTTP_TIMEOUT) -> Any:
     """直连本机回环地址，绕过系统代理环境变量/注册表代理。"""
     handlers: list[urllib.request.BaseHandler] = [urllib.request.ProxyHandler({})]
     if context is not None:
@@ -153,7 +168,7 @@ def _local_http_json(url: str, headers: dict, body: Optional[bytes] = None,
     opener = urllib.request.build_opener(*handlers)
     req = urllib.request.Request(url, data=body, headers=headers,
                                  method="POST" if body is not None else "GET")
-    with opener.open(req, timeout=LOCAL_HTTP_TIMEOUT) as resp:
+    with opener.open(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
 
@@ -269,6 +284,233 @@ class CodexProvider:
             if windows:
                 return windows
         return None
+
+    def _has_running_process(self) -> Optional[bool]:
+        try:
+            if sys.platform == "win32":
+                out = subprocess.run(
+                    ["tasklist", "/FO", "CSV", "/NH"],
+                    capture_output=True, timeout=5, creationflags=_NO_WINDOW,
+                ).stdout
+                return parse_tasklist_has_codex(decode_windows_output(out))
+            out = subprocess.run(
+                ["ps", "-eo", "comm="],
+                capture_output=True, text=True, errors="replace", timeout=5,
+            ).stdout
+            return "codex" in out.lower()
+        except (OSError, subprocess.SubprocessError):
+            return None
+
+    def fetch_tasks(self, now: Optional[float] = None) -> Optional[TaskStats]:
+        home = codex_home()
+        if not os.path.isdir(home):
+            return None
+        now = now if now is not None else time.time()
+        recent = _recent_codex_rollouts(home, CODEX_WAITING_MAX_AGE, now=now)
+        if not recent:
+            return TaskStats(0, 0)
+
+        running = 0
+        waiting = 0
+        waiting_titles: list[str] = []
+        for mtime, path in recent:
+            try:
+                lines = _read_head_and_tail_lines(path)
+            except OSError:
+                continue
+            state, is_subagent, title = parse_codex_session_state(lines)
+            if state == "waiting":
+                waiting += 1
+                if title and title not in waiting_titles and len(waiting_titles) < 5:
+                    waiting_titles.append(title)
+            elif state == "running" and not is_subagent and (now - mtime) <= CODEX_RUNNING_MAX_AGE:
+                running += 1
+
+        if (running > 0 or waiting > 0) and self._has_running_process() is False:
+            return TaskStats(0, 0)
+        return TaskStats(running=running, waiting=waiting, waiting_titles=waiting_titles)
+
+
+def parse_tasklist_has_codex(output: str) -> bool:
+    for row in csv.reader(output.splitlines()):
+        if row and "codex" in row[0].lower():
+            return True
+    return False
+
+
+_CODEX_WAIT_EVENTS = frozenset({
+    "exec_approval_request",
+    "apply_patch_approval_request",
+    "request_user_input",
+    "elicitation_request",
+})
+_CODEX_ACTIVE_CLEAR_WAIT = frozenset({
+    "exec_command_begin",
+    "exec_command_end",
+    "patch_apply_begin",
+    "patch_apply_end",
+    "agent_message",
+    "agent_reasoning",
+    "mcp_tool_call_begin",
+    "mcp_tool_call_end",
+})
+_CODEX_END_EVENTS = frozenset({
+    "task_complete",
+    "turn_complete",
+    "turn_aborted",
+    "task_aborted",
+    "turn_cancelled",
+    "turn_canceled",
+})
+
+
+def parse_codex_session_state(lines: Iterable[str]) -> tuple[str, bool, str]:
+    """解析单个 Codex rollout jsonl，返回 (idle|running|waiting, is_subagent, title)。"""
+    in_turn = False
+    waiting = False
+    pending_user_calls: set[str] = set()
+    is_subagent = False
+    title = ""
+
+    for line in lines:
+        s = line.strip()
+        if not s:
+            continue
+        try:
+            obj = json.loads(s)
+        except ValueError:
+            continue
+        if not isinstance(obj, dict):
+            continue
+        kind = obj.get("type")
+        payload = obj.get("payload")
+        if not isinstance(payload, dict):
+            continue
+
+        if kind == "session_meta":
+            src = payload.get("source")
+            if isinstance(src, dict) and ("subagent" in src or "thread_spawn" in src):
+                is_subagent = True
+        elif kind == "event_msg":
+            ev = str(payload.get("type") or "").lower()
+            if ev in ("task_started", "turn_started"):
+                in_turn = True
+                waiting = False
+            elif ev in _CODEX_END_EVENTS:
+                in_turn = False
+                waiting = False
+                pending_user_calls.clear()
+            elif ev == "user_message":
+                waiting = False
+                msg = payload.get("message")
+                if isinstance(msg, str) and msg.strip():
+                    title = re.sub(r"\s+", " ", msg).strip()[:36]
+            elif ev in _CODEX_WAIT_EVENTS or "approval_request" in ev or "request_user_input" in ev:
+                in_turn = True
+                waiting = True
+            elif ev in _CODEX_ACTIVE_CLEAR_WAIT:
+                waiting = False
+        elif kind == "response_item":
+            it = str(payload.get("type") or "").lower()
+            if it in ("function_call", "custom_tool_call"):
+                name = str(payload.get("name") or "").lower()
+                cid = str(payload.get("call_id") or "__anon__")
+                if name in ("request_user_input", "ask_user_question", "ask_question"):
+                    in_turn = True
+                    pending_user_calls.add(cid)
+                else:
+                    waiting = False
+            elif it in ("function_call_output", "custom_tool_call_output"):
+                cid = str(payload.get("call_id") or "")
+                pending_user_calls.discard(cid)
+                pending_user_calls.discard("__anon__")
+                waiting = False
+            elif it == "message" and payload.get("role") == "user":
+                waiting = False
+
+    if waiting or pending_user_calls:
+        return "waiting", is_subagent, title
+    if in_turn:
+        return "running", is_subagent, title
+    return "idle", is_subagent, title
+
+
+def _read_head_and_tail_lines(path: str, tail_bytes: int = 256 * 1024) -> list[str]:
+    size = os.path.getsize(path)
+    if size <= tail_bytes:
+        with open(path, encoding="utf-8", errors="ignore") as f:
+            return f.read().splitlines()
+    lines: list[str] = []
+    with open(path, "rb") as f:
+        head = f.readline(8192)
+        if head:
+            lines.append(head.decode("utf-8", errors="ignore"))
+        f.seek(size - tail_bytes)
+        f.readline()  # 丢弃可能被截断的首行
+        tail = f.read().decode("utf-8", errors="ignore")
+        lines.extend(tail.splitlines())
+    return lines
+
+
+def _recent_codex_rollouts(home: str, max_age: float, now: Optional[float] = None,
+                           limit: int = 20) -> list[tuple[float, str]]:
+    sessions_dir = os.path.join(home, "sessions")
+    if not os.path.isdir(sessions_dir):
+        return []
+    now = now if now is not None else time.time()
+    candidates: list[tuple[float, str]] = []
+
+    def add_dir_files(directory: str) -> None:
+        try:
+            with os.scandir(directory) as it:
+                for entry in it:
+                    if entry.name.startswith("rollout-") and entry.name.endswith(".jsonl") and entry.is_file():
+                        try:
+                            mtime = entry.stat().st_mtime
+                        except OSError:
+                            continue
+                        if (now - mtime) <= max_age:
+                            candidates.append((mtime, entry.path))
+        except OSError:
+            pass
+
+    add_dir_files(sessions_dir)
+
+    day_dirs: list[tuple[tuple[str, str, str], str]] = []
+    try:
+        years = sorted(
+            [e for e in os.scandir(sessions_dir) if e.is_dir()],
+            key=lambda e: e.name, reverse=True,
+        )
+    except OSError:
+        years = []
+    for y in years[:2]:
+        add_dir_files(y.path)
+        try:
+            months = sorted(
+                [e for e in os.scandir(y.path) if e.is_dir()],
+                key=lambda e: e.name, reverse=True,
+            )
+        except OSError:
+            continue
+        for m in months[:2]:
+            add_dir_files(m.path)
+            try:
+                days = sorted(
+                    [e for e in os.scandir(m.path) if e.is_dir()],
+                    key=lambda e: e.name, reverse=True,
+                )
+            except OSError:
+                continue
+            for d in days[:3]:
+                day_dirs.append(((y.name, m.name, d.name), d.path))
+
+    day_dirs.sort(key=lambda item: item[0], reverse=True)
+    for _, path in day_dirs[:3]:
+        add_dir_files(path)
+
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    return candidates[:limit]
 
 
 # ---------------------------------------------------------------- Antigravity
@@ -693,19 +935,124 @@ def parse_net_tcp_connections(raw_json: str, pid: int, preferred_port: Optional[
     return ports
 
 
+_AGY_SETTLED_STATUSES = frozenset({
+    "", "IDLE", "DONE", "COMPLETED", "CANCELLED", "CANCELED",
+    "STOPPED", "FAILED", "ERROR", "ARCHIVED", "UNSPECIFIED",
+})
+_AGY_STATE_RANK = {"idle": 0, "running": 1, "waiting": 2}
+
+
+def _step_is_settled(step: Any) -> bool:
+    if not isinstance(step, dict):
+        return False
+    st = re.sub(r"^CORTEX_STEP_STATUS_", "", str(step.get("status") or "").strip().upper())
+    return bool(re.fullmatch(r"DONE|COMPLETED|CANCELLED|CANCELED|ERROR|FAILED", st))
+
+
+def _trajectory_state(entry: dict) -> str:
+    waiting_steps = entry.get("waitingSteps")
+    if isinstance(waiting_steps, list) and any(not _step_is_settled(s) for s in waiting_steps):
+        return "waiting"
+    st = re.sub(r"^CASCADE_RUN_STATUS_", "", str(entry.get("status") or "").strip().upper())
+    if re.search(r"WAIT|APPROV|PENDING_USER|NEEDS_USER", st):
+        return "waiting"
+    if st not in _AGY_SETTLED_STATUSES or entry.get("hasRunningSubagents") is True:
+        return "running"
+    return "idle"
+
+
+def parse_antigravity_tasks(data: Any) -> TaskStats:
+    """解析 GetAllCascadeTrajectories 响应，统计运行中与待用户操作的根任务数。"""
+    if not isinstance(data, dict):
+        return TaskStats()
+    raw = data.get("trajectorySummaries")
+    if raw is None and isinstance(data.get("response"), dict):
+        raw = data["response"].get("trajectorySummaries")
+    if not isinstance(raw, dict):
+        return TaskStats()
+
+    entries = {str(k).lower(): v for k, v in raw.items() if isinstance(v, dict)}
+    root_states: dict[str, str] = {}
+    waiting_titles: list[str] = []
+
+    for cid, entry in entries.items():
+        meta = entry.get("trajectoryMetadata")
+        meta = meta if isinstance(meta, dict) else {}
+        src = meta.get("sourceMetadata")
+        src = src if isinstance(src, dict) else {}
+        is_sidecar = bool(src.get("sidecar"))
+        hide = src.get("hideFromConversationList") is True
+
+        root_id = cid
+        seen = {cid}
+        for _ in range(16):
+            cur = entries.get(root_id)
+            if not isinstance(cur, dict):
+                break
+            c_meta = cur.get("trajectoryMetadata")
+            c_meta = c_meta if isinstance(c_meta, dict) else {}
+            c_src = c_meta.get("sourceMetadata")
+            c_src = c_src if isinstance(c_src, dict) else {}
+            nxt_raw = (c_meta.get("rootConversationId")
+                       or c_src.get("rootConversationId")
+                       or c_meta.get("parentConversationId"))
+            if not isinstance(nxt_raw, str) or not nxt_raw.strip():
+                break
+            nxt = nxt_raw.strip().lower()
+            if nxt in seen:
+                break
+            seen.add(nxt)
+            root_id = nxt
+
+        root_entry = entries.get(root_id)
+        root_meta = root_entry.get("trajectoryMetadata") if isinstance(root_entry, dict) else None
+        root_src = root_meta.get("sourceMetadata") if isinstance(root_meta, dict) else None
+        root_sidecar = isinstance(root_src, dict) and bool(root_src.get("sidecar"))
+
+        if is_sidecar or root_sidecar or (root_id == cid and hide):
+            continue
+
+        state = _trajectory_state(entry)
+        prev = root_states.get(root_id, "idle")
+        if _AGY_STATE_RANK[state] > _AGY_STATE_RANK[prev] or root_id not in root_states:
+            root_states[root_id] = state
+
+        if state == "waiting":
+            title_src = root_entry if isinstance(root_entry, dict) else entry
+            raw_title = title_src.get("summary")
+            if isinstance(raw_title, str) and raw_title.strip():
+                title = re.sub(r"\s+", " ", raw_title).strip()[:36]
+                if title not in waiting_titles and len(waiting_titles) < 5:
+                    waiting_titles.append(title)
+
+    running = sum(1 for st in root_states.values() if st == "running")
+    waiting = sum(1 for st in root_states.values() if st == "waiting")
+    return TaskStats(running=running, waiting=waiting, waiting_titles=waiting_titles)
+
+
 class AntigravityProvider:
     name = "Antigravity (Gemini)"
 
-    def fetch(self, force: bool = False) -> ProviderResult:
-        try:
-            servers = self._find_servers()
-        except Exception as exc:  # noqa: BLE001
-            return ProviderResult(self.name, error=f"查找进程失败: {exc}")
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._endpoint: Optional[tuple[int, str, bool]] = None
+        self._discover_fail_until: float = 0.0
+
+    def _discover_endpoints(self, respect_cooldown: bool = False) -> tuple[list[tuple[int, str, bool]], str]:
+        if respect_cooldown:
+            with self._lock:
+                if time.time() < self._discover_fail_until:
+                    return [], "未检测到运行中的 Antigravity"
+
+        servers = self._find_servers()
         if not servers:
-            return ProviderResult(self.name, error="未检测到运行中的 Antigravity")
+            with self._lock:
+                self._discover_fail_until = time.time() + AGY_DISCOVER_COOLDOWN
+            return [], "未检测到运行中的 Antigravity"
 
         log_ports = self._read_log_ports()
         preferred_port = log_ports[0] if log_ports else None
+        endpoints: list[tuple[int, str, bool]] = []
         last_err = "未找到可用端口"
 
         for pid, cmd, args in servers:
@@ -720,13 +1067,12 @@ class AntigravityProvider:
                 continue
 
             token = cred["csrf"]
-            candidates: list[tuple[int, bool]] = []
             seen_ports: set[int] = set()
 
             def add_cand(port: Optional[int], prefer_http: bool) -> None:
                 if port and 1 <= port <= 65535 and port not in seen_ports:
                     seen_ports.add(port)
-                    candidates.append((port, prefer_http))
+                    endpoints.append((port, token, prefer_http))
 
             live_set = set(live_ports)
             for p in log_ports:
@@ -744,39 +1090,135 @@ class AntigravityProvider:
                     add_cand(p, True)
                 add_cand(cred.get("https_port"), False)
 
-            summary_payload = {"forceRefresh": True} if force else {}
-            status_payload = {"metadata": {"ideName": "antigravity", "extensionName": "antigravity",
-                                           "locale": "zh-CN"}}
+        with self._lock:
+            self._discover_fail_until = 0.0 if endpoints else time.time() + AGY_DISCOVER_COOLDOWN
+        return endpoints, ("" if endpoints else last_err)
 
-            for port, prefer_http in candidates:
-                fallback_status = False
-                try:
-                    data = self._call_rpc(port, token, "RetrieveUserQuotaSummary",
-                                          summary_payload, prefer_http=prefer_http)
-                    windows = parse_antigravity_quota_summary(data)
-                    if windows:
-                        return ProviderResult(self.name, windows, source="本地服务")
-                    last_err = "响应中没有 Gemini 额度信息"
-                    fallback_status = True
-                except urllib.error.HTTPError as exc:
-                    last_err = f"HTTP {exc.code}"
-                    fallback_status = exc.code not in (401, 403)
-                except Exception as exc:  # noqa: BLE001
-                    last_err = str(exc)
+    def _fetch_on_endpoint(self, port: int, token: str, prefer_http: bool,
+                           summary_payload: dict, status_payload: dict) -> tuple[Optional[dict], str, bool]:
+        fallback_status = False
+        last_err = "未找到可用端口"
+        try:
+            data = self._call_rpc(port, token, "RetrieveUserQuotaSummary",
+                                  summary_payload, prefer_http=prefer_http)
+            windows = parse_antigravity_quota_summary(data)
+            if windows:
+                return windows, "", False
+            last_err = "响应中没有 Gemini 额度信息"
+            fallback_status = True
+        except urllib.error.HTTPError as exc:
+            if exc.code in (401, 403):
+                return None, f"HTTP {exc.code}", True
+            last_err = f"HTTP {exc.code}"
+            fallback_status = True
+        except Exception as exc:  # noqa: BLE001
+            return None, str(exc), True
 
-                if fallback_status:
-                    try:
-                        status_data = self._call_rpc(port, token, "GetUserStatus",
-                                                     status_payload, prefer_http=prefer_http)
-                        windows = parse_antigravity_status(status_data)
-                        if windows:
-                            return ProviderResult(self.name, windows, source="本地服务")
-                        last_err = "响应中没有 Gemini 额度信息"
-                    except Exception as exc:  # noqa: BLE001
-                        if last_err == "未找到可用端口":
-                            last_err = str(exc)
+        if fallback_status:
+            try:
+                status_data = self._call_rpc(port, token, "GetUserStatus",
+                                             status_payload, prefer_http=prefer_http)
+                windows = parse_antigravity_status(status_data)
+                if windows:
+                    return windows, "", False
+                return None, "响应中没有 Gemini 额度信息", False
+            except urllib.error.HTTPError as exc:
+                if exc.code in (401, 403):
+                    return None, f"HTTP {exc.code}", True
+                return None, last_err or f"HTTP {exc.code}", False
+            except Exception as exc:  # noqa: BLE001
+                return None, last_err or str(exc), True
+        return None, last_err, False
+
+    def fetch(self, force: bool = False) -> ProviderResult:
+        summary_payload = {"forceRefresh": True} if force else {}
+        status_payload = {"metadata": {"ideName": "antigravity", "extensionName": "antigravity",
+                                       "locale": "zh-CN"}}
+
+        with self._lock:
+            cached = self._endpoint
+
+        last_err = "未找到可用端口"
+        if cached is not None:
+            windows, err, failed = self._fetch_on_endpoint(
+                cached[0], cached[1], cached[2], summary_payload, status_payload,
+            )
+            if windows:
+                return ProviderResult(self.name, windows, source="本地服务")
+            last_err = err
+            if failed:
+                with self._lock:
+                    if self._endpoint == cached:
+                        self._endpoint = None
+
+        try:
+            endpoints, disc_err = self._discover_endpoints(respect_cooldown=False)
+        except Exception as exc:  # noqa: BLE001
+            return ProviderResult(self.name, error=f"查找进程失败: {exc}")
+
+        if not endpoints:
+            return ProviderResult(self.name, error=disc_err or last_err)
+
+        for ep in endpoints:
+            if ep == cached:
+                continue
+            windows, err, _ = self._fetch_on_endpoint(
+                ep[0], ep[1], ep[2], summary_payload, status_payload,
+            )
+            if windows:
+                with self._lock:
+                    self._endpoint = ep
+                return ProviderResult(self.name, windows, source="本地服务")
+            last_err = err
 
         return ProviderResult(self.name, error=last_err)
+
+    def fetch_tasks(self) -> Optional[TaskStats]:
+        with self._lock:
+            cached = self._endpoint
+
+        if cached is not None:
+            port, token, prefer_http = cached
+            try:
+                data = self._call_rpc(
+                    port, token, "GetAllCascadeTrajectories",
+                    {"excludeSubtrajectories": False},
+                    prefer_http=prefer_http, timeout=LOCAL_TASK_TIMEOUT,
+                )
+                return parse_antigravity_tasks(data)
+            except urllib.error.HTTPError as exc:
+                if exc.code in (401, 403):
+                    with self._lock:
+                        if self._endpoint == cached:
+                            self._endpoint = None
+                else:
+                    return None
+            except Exception:  # noqa: BLE001
+                with self._lock:
+                    if self._endpoint == cached:
+                        self._endpoint = None
+
+        try:
+            endpoints, _ = self._discover_endpoints(respect_cooldown=True)
+        except Exception:  # noqa: BLE001
+            return None
+
+        for ep in endpoints:
+            if ep == cached:
+                continue
+            port, token, prefer_http = ep
+            try:
+                data = self._call_rpc(
+                    port, token, "GetAllCascadeTrajectories",
+                    {"excludeSubtrajectories": False},
+                    prefer_http=prefer_http, timeout=LOCAL_TASK_TIMEOUT,
+                )
+                with self._lock:
+                    self._endpoint = ep
+                return parse_antigravity_tasks(data)
+            except Exception:  # noqa: BLE001
+                continue
+        return None
 
     def _read_log_ports(self) -> list[int]:
         return read_log_http_ports(antigravity_log_candidates())
@@ -851,7 +1293,7 @@ class AntigravityProvider:
         return ports
 
     def _call_rpc(self, port: int, token: str, method: str, payload: dict,
-                  prefer_http: bool = True) -> Any:
+                  prefer_http: bool = True, timeout: float = LOCAL_HTTP_TIMEOUT) -> Any:
         body = json.dumps(payload).encode("utf-8")
         headers = {
             "Content-Type": "application/json",
@@ -866,20 +1308,20 @@ class AntigravityProvider:
 
         if prefer_http:
             try:
-                return _local_http_json(http_url, headers, body)
+                return _local_http_json(http_url, headers, body, timeout=timeout)
             except urllib.error.HTTPError as exc:
                 if exc.code != 400:
                     raise
-                return _local_http_json(https_url, headers, body, ctx)
+                return _local_http_json(https_url, headers, body, ctx, timeout=timeout)
             except (urllib.error.URLError, OSError, http.client.HTTPException):
-                return _local_http_json(https_url, headers, body, ctx)
+                return _local_http_json(https_url, headers, body, ctx, timeout=timeout)
 
         try:
-            return _local_http_json(https_url, headers, body, ctx)
+            return _local_http_json(https_url, headers, body, ctx, timeout=timeout)
         except urllib.error.HTTPError:
             raise
         except (ssl.SSLError, urllib.error.URLError, OSError, http.client.HTTPException):
-            return _local_http_json(http_url, headers, body)
+            return _local_http_json(http_url, headers, body, timeout=timeout)
 
 
 PROVIDERS = (AntigravityProvider, CodexProvider)
