@@ -32,9 +32,12 @@ ONE_WEEK = 7 * 24 * 3600
 HTTP_TIMEOUT = 8
 LOCAL_HTTP_TIMEOUT = 4
 LOCAL_TASK_TIMEOUT = 6
+CODEX_FRESH_MTIME = 180
 CODEX_RUNNING_MAX_AGE = 600
 CODEX_WAITING_MAX_AGE = 3600
+CODEX_UNFINISHED_MAX_AGE = 24 * 3600
 AGY_DISCOVER_COOLDOWN = 15
+AGY_TASK_REDISCOVER_SECONDS = 30
 AGY_SERVICE = "/exa.language_server_pb.LanguageServerService/"
 
 _NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0  # CREATE_NO_WINDOW
@@ -64,7 +67,14 @@ class ProviderResult:
 class TaskStats:
     running: int = 0
     waiting: int = 0
+    unfinished: int = 0
     waiting_titles: list[str] = field(default_factory=list)
+    unfinished_titles: list[str] = field(default_factory=list)
+
+
+def _append_title(dest: list[str], title: str, limit: int = 5) -> None:
+    if title and title not in dest and len(dest) < limit:
+        dest.append(title)
 
 
 # ---------------------------------------------------------------- 工具函数
@@ -292,7 +302,21 @@ class CodexProvider:
                     ["tasklist", "/FO", "CSV", "/NH"],
                     capture_output=True, timeout=5, creationflags=_NO_WINDOW,
                 ).stdout
-                return parse_tasklist_has_codex(decode_windows_output(out))
+                if parse_tasklist_has_codex(decode_windows_output(out)):
+                    return True
+                ps = ("[Console]::OutputEncoding=[Text.Encoding]::UTF8; "
+                      "Get-CimInstance Win32_Process | "
+                      "Where-Object { $_.CommandLine -match '(?i)\\bcodex\\b' -and "
+                      "$_.CommandLine -notmatch 'quota_float|providers\\.py' } | "
+                      "Select-Object -First 1 ProcessId | ConvertTo-Json -Compress")
+                proc = subprocess.run(
+                    ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
+                    capture_output=True, encoding="utf-8", errors="replace",
+                    timeout=8, creationflags=_NO_WINDOW,
+                )
+                if proc.returncode != 0:
+                    return None
+                return bool(proc.stdout.lstrip("\ufeff").strip())
             out = subprocess.run(
                 ["ps", "-eo", "comm="],
                 capture_output=True, text=True, errors="replace", timeout=5,
@@ -301,34 +325,69 @@ class CodexProvider:
         except (OSError, subprocess.SubprocessError):
             return None
 
-    def fetch_tasks(self, now: Optional[float] = None) -> Optional[TaskStats]:
+    def fetch_tasks(self, now: Optional[float] = None, force: bool = False) -> Optional[TaskStats]:
+        del force
         home = codex_home()
         if not os.path.isdir(home):
             return None
         now = now if now is not None else time.time()
-        recent = _recent_codex_rollouts(home, CODEX_WAITING_MAX_AGE, now=now)
+        recent = _recent_codex_rollouts(home, CODEX_UNFINISHED_MAX_AGE, now=now, limit=30)
         if not recent:
-            return TaskStats(0, 0)
+            return TaskStats(0, 0, 0)
 
         running = 0
         waiting = 0
+        unfinished = 0
         waiting_titles: list[str] = []
+        unfinished_titles: list[str] = []
+        demote_titles: list[str] = []
+        any_fresh = False
+
         for mtime, path in recent:
             try:
                 lines = _read_head_and_tail_lines(path)
             except OSError:
                 continue
+            age = max(0.0, now - mtime)
             state, is_subagent, title = parse_codex_session_state(lines)
             if state == "waiting":
-                waiting += 1
-                if title and title not in waiting_titles and len(waiting_titles) < 5:
-                    waiting_titles.append(title)
-            elif state == "running" and not is_subagent and (now - mtime) <= CODEX_RUNNING_MAX_AGE:
-                running += 1
+                if age <= CODEX_WAITING_MAX_AGE:
+                    waiting += 1
+                    if age <= CODEX_FRESH_MTIME:
+                        any_fresh = True
+                    _append_title(waiting_titles, title)
+                    _append_title(demote_titles, title)
+                else:
+                    unfinished += 1
+                    _append_title(unfinished_titles, title)
+            elif state == "running" and not is_subagent:
+                if age <= CODEX_RUNNING_MAX_AGE:
+                    running += 1
+                    if age <= CODEX_FRESH_MTIME:
+                        any_fresh = True
+                    _append_title(demote_titles, title)
+                else:
+                    unfinished += 1
+                    _append_title(unfinished_titles, title)
+            elif state == "aborted" and not is_subagent:
+                unfinished += 1
+                _append_title(unfinished_titles, title)
 
-        if (running > 0 or waiting > 0) and self._has_running_process() is False:
-            return TaskStats(0, 0)
-        return TaskStats(running=running, waiting=waiting, waiting_titles=waiting_titles)
+        if (running > 0 or waiting > 0) and not any_fresh and self._has_running_process() is False:
+            unfinished += running + waiting
+            for t in demote_titles:
+                _append_title(unfinished_titles, t)
+            running = 0
+            waiting = 0
+            waiting_titles = []
+
+        return TaskStats(
+            running=running,
+            waiting=waiting,
+            unfinished=unfinished,
+            waiting_titles=waiting_titles,
+            unfinished_titles=unfinished_titles,
+        )
 
 
 def parse_tasklist_has_codex(output: str) -> bool:
@@ -344,30 +403,49 @@ _CODEX_WAIT_EVENTS = frozenset({
     "request_user_input",
     "elicitation_request",
 })
-_CODEX_ACTIVE_CLEAR_WAIT = frozenset({
+_CODEX_IN_TURN_EVENTS = frozenset({
+    "task_started",
+    "turn_started",
+    "user_message",
+    "agent_message",
+    "agent_reasoning",
     "exec_command_begin",
     "exec_command_end",
     "patch_apply_begin",
     "patch_apply_end",
-    "agent_message",
-    "agent_reasoning",
     "mcp_tool_call_begin",
     "mcp_tool_call_end",
+    "item_started",
+    "turn_diff",
+    "web_search_begin",
+    "web_search_end",
 })
-_CODEX_END_EVENTS = frozenset({
-    "task_complete",
-    "turn_complete",
-    "turn_aborted",
-    "task_aborted",
-    "turn_cancelled",
-    "turn_canceled",
+_CODEX_CLEAR_WAIT_EVENTS = frozenset({
+    "task_started",
+    "turn_started",
+    "user_message",
+    "agent_message",
+    "agent_reasoning",
+    "exec_command_begin",
+    "exec_command_end",
+    "patch_apply_begin",
+    "patch_apply_end",
+    "mcp_tool_call_begin",
+    "mcp_tool_call_end",
+    "item_started",
+    "turn_diff",
+    "web_search_begin",
+    "web_search_end",
 })
+_CODEX_COMPLETE_EVENTS = frozenset({"task_complete", "turn_complete"})
+_CODEX_ABORT_EVENTS = frozenset({"turn_aborted", "task_aborted", "turn_cancelled", "turn_canceled"})
 
 
 def parse_codex_session_state(lines: Iterable[str]) -> tuple[str, bool, str]:
-    """解析单个 Codex rollout jsonl，返回 (idle|running|waiting, is_subagent, title)。"""
+    """解析单个 Codex rollout jsonl，返回 (idle|running|waiting|aborted, is_subagent, title)。"""
     in_turn = False
     waiting = False
+    aborted = False
     pending_user_calls: set[str] = set()
     is_subagent = False
     title = ""
@@ -384,58 +462,88 @@ def parse_codex_session_state(lines: Iterable[str]) -> tuple[str, bool, str]:
             continue
         kind = obj.get("type")
         payload = obj.get("payload")
-        if not isinstance(payload, dict):
-            continue
+        has_payload = isinstance(payload, dict)
 
-        if kind == "session_meta":
+        if kind == "session_meta" and has_payload:
             src = payload.get("source")
             if isinstance(src, dict) and ("subagent" in src or "thread_spawn" in src):
                 is_subagent = True
-        elif kind == "event_msg":
-            ev = str(payload.get("type") or "").lower()
-            if ev in ("task_started", "turn_started"):
-                in_turn = True
-                waiting = False
-            elif ev in _CODEX_END_EVENTS:
-                in_turn = False
-                waiting = False
-                pending_user_calls.clear()
-            elif ev == "user_message":
-                waiting = False
-                msg = payload.get("message")
-                if isinstance(msg, str) and msg.strip():
-                    title = re.sub(r"\s+", " ", msg).strip()[:36]
-            elif ev in _CODEX_WAIT_EVENTS or "approval_request" in ev or "request_user_input" in ev:
-                in_turn = True
-                waiting = True
-            elif ev in _CODEX_ACTIVE_CLEAR_WAIT:
-                waiting = False
-        elif kind == "response_item":
+        elif kind == "turn_context":
+            in_turn = True
+            aborted = False
+        elif kind == "response_item" and has_payload:
             it = str(payload.get("type") or "").lower()
             if it in ("function_call", "custom_tool_call"):
+                in_turn = True
+                aborted = False
                 name = str(payload.get("name") or "").lower()
                 cid = str(payload.get("call_id") or "__anon__")
                 if name in ("request_user_input", "ask_user_question", "ask_question"):
-                    in_turn = True
                     pending_user_calls.add(cid)
                 else:
                     waiting = False
             elif it in ("function_call_output", "custom_tool_call_output"):
+                in_turn = True
+                aborted = False
                 cid = str(payload.get("call_id") or "")
                 pending_user_calls.discard(cid)
                 pending_user_calls.discard("__anon__")
                 waiting = False
-            elif it == "message" and payload.get("role") == "user":
+            elif it in ("local_shell_call", "local_shell_call_output", "web_search_call", "reasoning"):
+                in_turn = True
+                aborted = False
                 waiting = False
+            elif it == "message":
+                role = str(payload.get("role") or "").lower()
+                phase = str(payload.get("phase") or "").lower()
+                if role == "user":
+                    in_turn = True
+                    aborted = False
+                    waiting = False
+                elif role == "assistant" and phase == "final_answer":
+                    in_turn = False
+                    waiting = False
+                    aborted = False
+                    pending_user_calls.clear()
+        elif kind == "event_msg" and has_payload or isinstance(kind, str):
+            ev_obj = payload if (kind == "event_msg" and has_payload) else obj
+            ev = str((ev_obj.get("type") if kind == "event_msg" else kind) or "").lower()
+            if ev in ("", "token_count"):
+                continue
+            if ev in _CODEX_COMPLETE_EVENTS:
+                in_turn = False
+                waiting = False
+                aborted = False
+                pending_user_calls.clear()
+            elif ev in _CODEX_ABORT_EVENTS:
+                in_turn = False
+                waiting = False
+                aborted = True
+                pending_user_calls.clear()
+            elif ev in _CODEX_WAIT_EVENTS or "approval_request" in ev or "request_user_input" in ev:
+                in_turn = True
+                waiting = True
+                aborted = False
+            elif ev in _CODEX_IN_TURN_EVENTS:
+                in_turn = True
+                aborted = False
+                if ev in _CODEX_CLEAR_WAIT_EVENTS:
+                    waiting = False
+                if ev == "user_message":
+                    msg = ev_obj.get("message")
+                    if isinstance(msg, str) and msg.strip():
+                        title = re.sub(r"\s+", " ", msg).strip()[:36]
 
     if waiting or pending_user_calls:
         return "waiting", is_subagent, title
     if in_turn:
         return "running", is_subagent, title
+    if aborted:
+        return "aborted", is_subagent, title
     return "idle", is_subagent, title
 
 
-def _read_head_and_tail_lines(path: str, tail_bytes: int = 256 * 1024) -> list[str]:
+def _read_head_and_tail_lines(path: str, tail_bytes: int = 512 * 1024) -> list[str]:
     size = os.path.getsize(path)
     if size <= tail_bytes:
         with open(path, encoding="utf-8", errors="ignore") as f:
@@ -459,12 +567,15 @@ def _recent_codex_rollouts(home: str, max_age: float, now: Optional[float] = Non
         return []
     now = now if now is not None else time.time()
     candidates: list[tuple[float, str]] = []
-
-    def add_dir_files(directory: str) -> None:
+    stack = [sessions_dir]
+    while stack:
+        current = stack.pop()
         try:
-            with os.scandir(directory) as it:
+            with os.scandir(current) as it:
                 for entry in it:
-                    if entry.name.startswith("rollout-") and entry.name.endswith(".jsonl") and entry.is_file():
+                    if entry.is_dir(follow_symlinks=False):
+                        stack.append(entry.path)
+                    elif entry.name.startswith("rollout-") and entry.name.endswith(".jsonl") and entry.is_file():
                         try:
                             mtime = entry.stat().st_mtime
                         except OSError:
@@ -472,42 +583,7 @@ def _recent_codex_rollouts(home: str, max_age: float, now: Optional[float] = Non
                         if (now - mtime) <= max_age:
                             candidates.append((mtime, entry.path))
         except OSError:
-            pass
-
-    add_dir_files(sessions_dir)
-
-    day_dirs: list[tuple[tuple[str, str, str], str]] = []
-    try:
-        years = sorted(
-            [e for e in os.scandir(sessions_dir) if e.is_dir()],
-            key=lambda e: e.name, reverse=True,
-        )
-    except OSError:
-        years = []
-    for y in years[:2]:
-        add_dir_files(y.path)
-        try:
-            months = sorted(
-                [e for e in os.scandir(y.path) if e.is_dir()],
-                key=lambda e: e.name, reverse=True,
-            )
-        except OSError:
             continue
-        for m in months[:2]:
-            add_dir_files(m.path)
-            try:
-                days = sorted(
-                    [e for e in os.scandir(m.path) if e.is_dir()],
-                    key=lambda e: e.name, reverse=True,
-                )
-            except OSError:
-                continue
-            for d in days[:3]:
-                day_dirs.append(((y.name, m.name, d.name), d.path))
-
-    day_dirs.sort(key=lambda item: item[0], reverse=True)
-    for _, path in day_dirs[:3]:
-        add_dir_files(path)
 
     candidates.sort(key=lambda item: item[0], reverse=True)
     return candidates[:limit]
@@ -676,11 +752,46 @@ def parse_cmdline_args(cmdline: str) -> dict:
         m = re.search(rf"--{key}[=\s]+\"?([^\s\"]+)", cmdline)
         if m:
             args[key] = m.group(1)
+    hub = re.search(r"--hub-port(?:=|\s+)[\"']?(\d+)", cmdline, re.I)
+    if hub:
+        args["hub_port"] = hub.group(1)
     return args
 
 
 def is_standalone_cmdline(cmdline: str) -> bool:
     return bool(re.search(r"(?:^|\s)--standalone(?:\s|=|$)", cmdline or ""))
+
+
+def _command_basename(cmd: str) -> str:
+    s = (cmd or "").lstrip()
+    if not s:
+        return ""
+    if s[0] in ("'", '"'):
+        end = s.find(s[0], 1)
+        token = s[1:end] if end != -1 else s[1:]
+    else:
+        token = s.split(None, 1)[0]
+    return os.path.basename(token.replace("\\", "/"))
+
+
+def is_antigravity_server(name: str, cmd: str) -> bool:
+    """识别 Antigravity Desktop / IDE / hub 服务进程，排除纯 LSP。"""
+    cmd_s = cmd or ""
+    if re.search(r"(?:^|\s)[\"']?--enable_lsp(?:=|\s|$)", cmd_s, re.I):
+        return False
+    low_name = (name or "").lower()
+    low_cmd = cmd_s.lower()
+    if low_name in ("agy", "agy.exe"):
+        return bool(re.search(r"(?:^|\s)[\"']?--hub(?:=|\s|$)", cmd_s, re.I))
+    if "language_server" in low_name or "language_server" in low_cmd:
+        return (
+            is_standalone_cmdline(cmd_s)
+            or bool(re.search(r"(?:^|\s)[\"']?--subclient_type(?:=|\s+)[\"']?ide[\"']?(?=\s|$)", cmd_s, re.I))
+            or "antigravity" in low_cmd
+            or "--csrf_token" in low_cmd
+            or "--app_data_dir" in low_cmd
+        )
+    return False
 
 
 def antigravity_log_candidates(home: Optional[str] = None, env: Optional[dict] = None,
@@ -694,17 +805,37 @@ def antigravity_log_candidates(home: Optional[str] = None, env: Optional[dict] =
             os.path.join(appdata, "Antigravity", "logs", "language_server.log"),
             os.path.join(home, ".gemini", "antigravity", "logs", "language_server.log"),
         ]
+        profiles = [os.path.join(appdata, "Antigravity IDE"), os.path.join(appdata, "Antigravity")]
     elif platform == "darwin":
+        app_sup = os.path.join(home, "Library", "Application Support")
         raw = [
             os.path.join(home, "Library", "Logs", "Antigravity", "language_server.log"),
-            os.path.join(home, "Library", "Application Support", "Antigravity", "logs", "language_server.log"),
+            os.path.join(app_sup, "Antigravity", "logs", "language_server.log"),
         ]
+        profiles = [os.path.join(app_sup, "Antigravity IDE"), os.path.join(app_sup, "Antigravity")]
     else:
         xdg = env.get("XDG_CONFIG_HOME") or os.path.join(home, ".config")
         raw = [
             os.path.join(xdg, "Antigravity", "logs", "language_server.log"),
             os.path.join(home, ".gemini", "antigravity", "logs", "language_server.log"),
         ]
+        profiles = [os.path.join(xdg, "Antigravity IDE"), os.path.join(xdg, "Antigravity")]
+
+    ide_logs: list[tuple[str, str]] = []
+    for profile in profiles:
+        logs_dir = os.path.join(profile, "logs")
+        try:
+            subdirs = sorted(
+                (e.name for e in os.scandir(logs_dir)
+                 if e.is_dir() and re.fullmatch(r"\d{8}T\d{6}", e.name)),
+                reverse=True,
+            )
+        except OSError:
+            continue
+        for sub in subdirs[:4]:
+            ide_logs.append((sub, os.path.join(logs_dir, sub, "ls-main.log")))
+    ide_logs.sort(key=lambda item: item[0], reverse=True)
+    raw.extend(path for _, path in ide_logs[:4])
     return list(dict.fromkeys(raw))
 
 
@@ -939,7 +1070,8 @@ _AGY_SETTLED_STATUSES = frozenset({
     "", "IDLE", "DONE", "COMPLETED", "CANCELLED", "CANCELED",
     "STOPPED", "FAILED", "ERROR", "ARCHIVED", "UNSPECIFIED",
 })
-_AGY_STATE_RANK = {"idle": 0, "running": 1, "waiting": 2}
+_AGY_UNFINISHED_STATUSES = frozenset({"PAUSED", "SUSPENDED", "SLEEPING", "INTERRUPTED"})
+_AGY_STATE_RANK = {"idle": 0, "unfinished": 1, "running": 2, "waiting": 3}
 
 
 def _step_is_settled(step: Any) -> bool:
@@ -953,16 +1085,61 @@ def _trajectory_state(entry: dict) -> str:
     waiting_steps = entry.get("waitingSteps")
     if isinstance(waiting_steps, list) and any(not _step_is_settled(s) for s in waiting_steps):
         return "waiting"
-    st = re.sub(r"^CASCADE_RUN_STATUS_", "", str(entry.get("status") or "").strip().upper())
-    if re.search(r"WAIT|APPROV|PENDING_USER|NEEDS_USER", st):
-        return "waiting"
-    if st not in _AGY_SETTLED_STATUSES or entry.get("hasRunningSubagents") is True:
+    raw_status = entry.get("status")
+    if isinstance(raw_status, int) and not isinstance(raw_status, bool):
+        if raw_status == 3:
+            return "waiting"
+        if raw_status == 2:
+            return "running"
+    else:
+        st = re.sub(r"^CASCADE_RUN_STATUS_", "", str(raw_status or "").strip().upper())
+        if re.search(r"WAIT|APPROV|PENDING_USER|NEEDS_USER", st):
+            return "waiting"
+        if st in _AGY_UNFINISHED_STATUSES:
+            return "unfinished"
+        if st not in _AGY_SETTLED_STATUSES:
+            return "running"
+    if entry.get("hasRunningSubagents") is True:
         return "running"
+    if entry.get("hasActiveChildren") is True or entry.get("notFullyIdle") is True:
+        return "unfinished"
     return "idle"
 
 
+def _extract_summaries_map(data: Any) -> Optional[dict]:
+    if not isinstance(data, dict):
+        return None
+    if isinstance(data.get("trajectorySummaries"), dict):
+        return data["trajectorySummaries"]
+    resp = data.get("response")
+    if isinstance(resp, dict) and isinstance(resp.get("trajectorySummaries"), dict):
+        return resp["trajectorySummaries"]
+    return {}
+
+
+def merge_antigravity_summaries(summary_maps: Iterable[dict]) -> dict:
+    """合并多个 Antigravity 服务返回的 trajectorySummaries，同 ID 取更活跃状态。"""
+    merged: dict[str, dict] = {}
+    for smap in summary_maps:
+        if not isinstance(smap, dict):
+            continue
+        for raw_cid, entry in smap.items():
+            if not isinstance(entry, dict):
+                continue
+            cid = str(raw_cid).lower()
+            cur = merged.get(cid)
+            if cur is None:
+                merged[cid] = entry
+                continue
+            new_key = (_AGY_STATE_RANK[_trajectory_state(entry)], _strict_int(entry.get("stepCount")) or 0)
+            cur_key = (_AGY_STATE_RANK[_trajectory_state(cur)], _strict_int(cur.get("stepCount")) or 0)
+            if new_key > cur_key:
+                merged[cid] = entry
+    return merged
+
+
 def parse_antigravity_tasks(data: Any) -> TaskStats:
-    """解析 GetAllCascadeTrajectories 响应，统计运行中与待用户操作的根任务数。"""
+    """解析 GetAllCascadeTrajectories 响应，统计运行中、待操作与未结束根任务数。"""
     if not isinstance(data, dict):
         return TaskStats()
     raw = data.get("trajectorySummaries")
@@ -973,7 +1150,7 @@ def parse_antigravity_tasks(data: Any) -> TaskStats:
 
     entries = {str(k).lower(): v for k, v in raw.items() if isinstance(v, dict)}
     root_states: dict[str, str] = {}
-    waiting_titles: list[str] = []
+    root_summaries: dict[str, str] = {}
 
     for cid, entry in entries.items():
         meta = entry.get("trajectoryMetadata")
@@ -1017,17 +1194,34 @@ def parse_antigravity_tasks(data: Any) -> TaskStats:
         if _AGY_STATE_RANK[state] > _AGY_STATE_RANK[prev] or root_id not in root_states:
             root_states[root_id] = state
 
-        if state == "waiting":
+        if root_id not in root_summaries:
             title_src = root_entry if isinstance(root_entry, dict) else entry
             raw_title = title_src.get("summary")
             if isinstance(raw_title, str) and raw_title.strip():
-                title = re.sub(r"\s+", " ", raw_title).strip()[:36]
-                if title not in waiting_titles and len(waiting_titles) < 5:
-                    waiting_titles.append(title)
+                root_summaries[root_id] = re.sub(r"\s+", " ", raw_title).strip()[:36]
 
-    running = sum(1 for st in root_states.values() if st == "running")
-    waiting = sum(1 for st in root_states.values() if st == "waiting")
-    return TaskStats(running=running, waiting=waiting, waiting_titles=waiting_titles)
+    running = 0
+    waiting = 0
+    unfinished = 0
+    waiting_titles: list[str] = []
+    unfinished_titles: list[str] = []
+    for rid, st in root_states.items():
+        if st == "waiting":
+            waiting += 1
+            _append_title(waiting_titles, root_summaries.get(rid, ""))
+        elif st == "running":
+            running += 1
+        elif st == "unfinished":
+            unfinished += 1
+            _append_title(unfinished_titles, root_summaries.get(rid, ""))
+
+    return TaskStats(
+        running=running,
+        waiting=waiting,
+        unfinished=unfinished,
+        waiting_titles=waiting_titles,
+        unfinished_titles=unfinished_titles,
+    )
 
 
 class AntigravityProvider:
@@ -1036,9 +1230,11 @@ class AntigravityProvider:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._endpoint: Optional[tuple[int, str, bool]] = None
+        self._task_endpoints: dict[int, tuple[int, str, bool]] = {}
+        self._task_discover_at: float = 0.0
         self._discover_fail_until: float = 0.0
 
-    def _discover_endpoints(self, respect_cooldown: bool = False) -> tuple[list[tuple[int, str, bool]], str]:
+    def _discover_server_endpoints(self, respect_cooldown: bool = False) -> tuple[list[tuple[int, list[tuple[int, str, bool]]]], str]:
         if respect_cooldown:
             with self._lock:
                 if time.time() < self._discover_fail_until:
@@ -1052,11 +1248,13 @@ class AntigravityProvider:
 
         log_ports = self._read_log_ports()
         preferred_port = log_ports[0] if log_ports else None
-        endpoints: list[tuple[int, str, bool]] = []
+        per_server: list[tuple[int, list[tuple[int, str, bool]]]] = []
         last_err = "未找到可用端口"
 
         for pid, cmd, args in servers:
-            live_ports = self._listening_ports(pid, preferred_port=preferred_port)
+            hub_port = int(args["hub_port"]) if args.get("hub_port", "").isdigit() else None
+            pref = hub_port or preferred_port
+            live_ports = self._listening_ports(pid, preferred_port=pref)
             cred = self._resolve_daemon(cmd, pid, live_ports)
             if cred and cred.get("http_port") and cred["http_port"] not in live_ports:
                 for p in self._listening_ports(pid, preferred_port=cred["http_port"]):
@@ -1067,14 +1265,17 @@ class AntigravityProvider:
                 continue
 
             token = cred["csrf"]
+            cands: list[tuple[int, str, bool]] = []
             seen_ports: set[int] = set()
 
             def add_cand(port: Optional[int], prefer_http: bool) -> None:
                 if port and 1 <= port <= 65535 and port not in seen_ports:
                     seen_ports.add(port)
-                    endpoints.append((port, token, prefer_http))
+                    cands.append((port, token, prefer_http))
 
             live_set = set(live_ports)
+            if hub_port and hub_port in live_set:
+                add_cand(hub_port, True)
             for p in log_ports:
                 if p in live_set:
                     add_cand(p, True)
@@ -1085,14 +1286,26 @@ class AntigravityProvider:
             if args.get("extension_server_port", "").isdigit():
                 add_cand(int(args["extension_server_port"]), False)
             if not live_ports:
+                if hub_port:
+                    add_cand(hub_port, True)
                 add_cand(cred.get("http_port"), True)
                 for p in log_ports[:3]:
                     add_cand(p, True)
                 add_cand(cred.get("https_port"), False)
 
+            if cands:
+                per_server.append((pid, cands))
+
         with self._lock:
-            self._discover_fail_until = 0.0 if endpoints else time.time() + AGY_DISCOVER_COOLDOWN
-        return endpoints, ("" if endpoints else last_err)
+            self._discover_fail_until = 0.0 if per_server else time.time() + AGY_DISCOVER_COOLDOWN
+        return per_server, ("" if per_server else last_err)
+
+    def _discover_endpoints(self, respect_cooldown: bool = False) -> tuple[list[tuple[int, str, bool]], str]:
+        per_server, err = self._discover_server_endpoints(respect_cooldown=respect_cooldown)
+        endpoints: list[tuple[int, str, bool]] = []
+        for _, cands in per_server:
+            endpoints.extend(cands)
+        return endpoints, err
 
     def _fetch_on_endpoint(self, port: int, token: str, prefer_http: bool,
                            summary_payload: dict, status_payload: dict) -> tuple[Optional[dict], str, bool]:
@@ -1173,52 +1386,87 @@ class AntigravityProvider:
 
         return ProviderResult(self.name, error=last_err)
 
-    def fetch_tasks(self) -> Optional[TaskStats]:
+    def fetch_tasks(self, force: bool = False) -> Optional[TaskStats]:
         with self._lock:
-            cached = self._endpoint
+            cached_map = dict(self._task_endpoints)
+            discover_at = self._task_discover_at
 
-        if cached is not None:
-            port, token, prefer_http = cached
-            try:
-                data = self._call_rpc(
-                    port, token, "GetAllCascadeTrajectories",
-                    {"excludeSubtrajectories": False},
-                    prefer_http=prefer_http, timeout=LOCAL_TASK_TIMEOUT,
-                )
-                return parse_antigravity_tasks(data)
-            except urllib.error.HTTPError as exc:
-                if exc.code in (401, 403):
+        if not force and cached_map and (time.time() - discover_at) < AGY_TASK_REDISCOVER_SECONDS:
+            collected: list[dict] = []
+            need_rediscover = False
+            for pid, ep in cached_map.items():
+                port, token, prefer_http = ep
+                try:
+                    data = self._call_rpc(
+                        port, token, "GetAllCascadeTrajectories",
+                        {"excludeSubtrajectories": False},
+                        prefer_http=prefer_http, timeout=LOCAL_TASK_TIMEOUT,
+                    )
+                    smap = _extract_summaries_map(data)
+                    if smap is not None:
+                        collected.append(smap)
+                except urllib.error.HTTPError as exc:
+                    if exc.code in (401, 403):
+                        need_rediscover = True
+                        with self._lock:
+                            if self._task_endpoints.get(pid) == ep:
+                                self._task_endpoints.pop(pid, None)
+                except Exception:  # noqa: BLE001
+                    need_rediscover = True
                     with self._lock:
-                        if self._endpoint == cached:
-                            self._endpoint = None
-                else:
+                        if self._task_endpoints.get(pid) == ep:
+                            self._task_endpoints.pop(pid, None)
+
+            if not need_rediscover:
+                if not collected:
                     return None
-            except Exception:  # noqa: BLE001
-                with self._lock:
-                    if self._endpoint == cached:
-                        self._endpoint = None
+                return parse_antigravity_tasks({"trajectorySummaries": merge_antigravity_summaries(collected)})
 
         try:
-            endpoints, _ = self._discover_endpoints(respect_cooldown=True)
+            server_cands, _ = self._discover_server_endpoints(respect_cooldown=not force)
         except Exception:  # noqa: BLE001
             return None
 
-        for ep in endpoints:
-            if ep == cached:
-                continue
-            port, token, prefer_http = ep
-            try:
-                data = self._call_rpc(
-                    port, token, "GetAllCascadeTrajectories",
-                    {"excludeSubtrajectories": False},
-                    prefer_http=prefer_http, timeout=LOCAL_TASK_TIMEOUT,
-                )
-                with self._lock:
-                    self._endpoint = ep
-                return parse_antigravity_tasks(data)
-            except Exception:  # noqa: BLE001
-                continue
-        return None
+        with self._lock:
+            self._task_discover_at = time.time()
+            prev_map = dict(self._task_endpoints)
+
+        new_map: dict[int, tuple[int, str, bool]] = {}
+        collected = []
+        for pid, cands in server_cands:
+            ordered: list[tuple[int, str, bool]] = []
+            prev_ep = prev_map.get(pid)
+            if prev_ep is not None:
+                ordered.append(prev_ep)
+            for ep in cands:
+                if ep not in ordered:
+                    ordered.append(ep)
+            for ep in ordered:
+                port, token, prefer_http = ep
+                try:
+                    data = self._call_rpc(
+                        port, token, "GetAllCascadeTrajectories",
+                        {"excludeSubtrajectories": False},
+                        prefer_http=prefer_http, timeout=LOCAL_TASK_TIMEOUT,
+                    )
+                    smap = _extract_summaries_map(data)
+                    if smap is None:
+                        continue
+                    collected.append(smap)
+                    new_map[pid] = ep
+                    with self._lock:
+                        if self._endpoint is None:
+                            self._endpoint = ep
+                    break
+                except Exception:  # noqa: BLE001
+                    continue
+
+        with self._lock:
+            self._task_endpoints = new_map
+
+        if not collected:
+            return None
+        return parse_antigravity_tasks({"trajectorySummaries": merge_antigravity_summaries(collected)})
 
     def _read_log_ports(self) -> list[int]:
         return read_log_http_ports(antigravity_log_candidates())
@@ -1230,29 +1478,42 @@ class AntigravityProvider:
         if sys.platform != "win32":
             out = subprocess.run(["ps", "-ww", "-axo", "pid=,args="], capture_output=True,
                                  text=True, errors="replace", timeout=10).stdout
-            rows = [line.strip().split(None, 1) for line in out.splitlines() if line.strip()]
+            raw_rows: list[tuple[str, str, str]] = []
+            for line in out.splitlines():
+                parts = line.strip().split(None, 1)
+                if len(parts) == 2:
+                    raw_rows.append((parts[0], _command_basename(parts[1]), parts[1]))
         else:
             ps = ("[Console]::OutputEncoding=[Text.Encoding]::UTF8; "
-                  "Get-CimInstance Win32_Process -Filter \"Name like 'language_server%'\" | "
-                  "Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress")
+                  "Get-CimInstance Win32_Process -Filter \"Name like 'language_server%' or Name='agy.exe'\" | "
+                  "Select-Object ProcessId,Name,CommandLine | ConvertTo-Json -Compress")
             out = subprocess.run(["powershell", "-NoProfile", "-Command", ps], capture_output=True,
                                  encoding="utf-8", errors="replace", timeout=15,
-                                 creationflags=_NO_WINDOW).stdout.strip()
+                                 creationflags=_NO_WINDOW).stdout.lstrip("\ufeff").strip()
             items = json.loads(out) if out else []
             items = items if isinstance(items, list) else [items]
-            rows = [(str(i.get("ProcessId")), i.get("CommandLine") or "") for i in items]
-        servers: list[tuple[int, str, dict]] = []
-        for row in rows:
-            if len(row) != 2:
+            raw_rows = [
+                (str(i.get("ProcessId")), str(i.get("Name") or ""), i.get("CommandLine") or "")
+                for i in items if isinstance(i, dict)
+            ]
+
+        scored: list[tuple[int, int, str, dict]] = []
+        for pid_str, name, cmd in raw_rows:
+            if not pid_str.isdigit() or not is_antigravity_server(name, cmd):
                 continue
-            pid_str, cmd = row
-            if not pid_str.isdigit():
-                continue
-            low = cmd.lower()
-            if "language_server" in low and (is_standalone_cmdline(cmd) or "antigravity" in low):
-                servers.append((int(pid_str), cmd, parse_cmdline_args(cmd)))
-        servers.sort(key=lambda item: not is_standalone_cmdline(item[1]))
-        return servers
+            low_name = name.lower()
+            low_cmd = cmd.lower()
+            if is_standalone_cmdline(cmd):
+                pri = 0
+            elif low_name in ("agy", "agy.exe") and re.search(r"(?:^|\s)[\"']?--hub(?:=|\s|$)", cmd, re.I):
+                pri = 1
+            elif re.search(r"(?:^|\s)[\"']?--subclient_type(?:=|\s+)[\"']?ide[\"']?(?=\s|$)", low_cmd):
+                pri = 2
+            else:
+                pri = 3
+            scored.append((pri, int(pid_str), cmd, parse_cmdline_args(cmd)))
+        scored.sort(key=lambda item: (item[0], item[1]))
+        return [(pid, cmd, args) for _, pid, cmd, args in scored]
 
     def _listening_ports(self, pid: int, preferred_port: Optional[int] = None) -> list[int]:
         if sys.platform != "win32":
@@ -1325,3 +1586,128 @@ class AntigravityProvider:
 
 
 PROVIDERS = (AntigravityProvider, CodexProvider)
+
+
+def _rollout_event_tags(lines: Iterable[str], limit: int = 3) -> list[str]:
+    tags: list[str] = []
+    for line in lines:
+        s = line.strip()
+        if not s:
+            continue
+        try:
+            obj = json.loads(s)
+        except ValueError:
+            continue
+        if not isinstance(obj, dict):
+            continue
+        kind = obj.get("type")
+        payload = obj.get("payload")
+        if kind in ("event_msg", "response_item") and isinstance(payload, dict):
+            sub = payload.get("type")
+            tag = f"{kind}:{sub}" if sub else str(kind)
+            if kind == "response_item" and payload.get("name"):
+                tag += f"({payload['name']})"
+        else:
+            tag = str(kind or "unknown")
+        tags.append(tag)
+    return tags[-limit:]
+
+
+def run_diagnose() -> None:
+    """输出脱敏诊断信息（不含令牌、提示词或对话文本）。"""
+    ag = AntigravityProvider()
+    print("[Antigravity]")
+    try:
+        servers = ag._find_servers()
+        flags_summary = []
+        for pid, cmd, args in servers:
+            flags = []
+            if is_standalone_cmdline(cmd):
+                flags.append("standalone")
+            if re.search(r"(?:^|\s)[\"']?--hub(?:=|\s|$)", cmd, re.I):
+                flags.append("hub")
+            if re.search(r"(?:^|\s)[\"']?--subclient_type(?:=|\s+)[\"']?ide[\"']?(?=\s|$)", cmd, re.I):
+                flags.append("ide")
+            if args.get("hub_port"):
+                flags.append(f"hub_port={args['hub_port']}")
+            flags_summary.append((pid, flags or ["other"]))
+        print(f"  servers: {flags_summary}")
+    except Exception as exc:  # noqa: BLE001
+        print(f"  servers error: {exc}")
+
+    try:
+        per_server, err = ag._discover_server_endpoints(respect_cooldown=False)
+        if err:
+            print(f"  discovery note: {err}")
+        for pid, cands in per_server:
+            ports = [p for p, _, _ in cands]
+            print(f"  pid={pid} candidate_ports={ports}")
+            for port, token, prefer_http in cands:
+                try:
+                    data = ag._call_rpc(
+                        port, token, "GetAllCascadeTrajectories",
+                        {"excludeSubtrajectories": False},
+                        prefer_http=prefer_http, timeout=LOCAL_TASK_TIMEOUT,
+                    )
+                    smap = _extract_summaries_map(data)
+                    if smap is None:
+                        continue
+                    non_idle = []
+                    for entry in smap.values():
+                        if not isinstance(entry, dict):
+                            continue
+                        st = _trajectory_state(entry)
+                        if st != "idle":
+                            ws = entry.get("waitingSteps")
+                            non_idle.append((
+                                st,
+                                entry.get("status"),
+                                len(ws) if isinstance(ws, list) else 0,
+                                bool(entry.get("hasRunningSubagents")),
+                                bool(entry.get("hasActiveChildren")),
+                                bool(entry.get("notFullyIdle")),
+                            ))
+                    print(f"    port={port} total={len(smap)} non_idle={non_idle[:20]}")
+                    break
+                except Exception as exc:  # noqa: BLE001
+                    print(f"    port={port} err={exc}")
+        ts_ag = ag.fetch_tasks(force=True)
+        if ts_ag is None:
+            print("  stats: None")
+        else:
+            print(f"  stats: running={ts_ag.running} waiting={ts_ag.waiting} unfinished={ts_ag.unfinished}")
+    except Exception as exc:  # noqa: BLE001
+        print(f"  diagnose error: {exc}")
+
+    print("[Codex]")
+    home = codex_home()
+    exists = os.path.isdir(home)
+    print(f"  codex_home exists={exists}")
+    if exists:
+        now = time.time()
+        try:
+            recent = _recent_codex_rollouts(home, CODEX_UNFINISHED_MAX_AGE, now=now, limit=30)
+            print(f"  recent_rollouts_24h={len(recent)}")
+            for mtime, path in recent[:15]:
+                try:
+                    size = os.path.getsize(path)
+                    lines = _read_head_and_tail_lines(path)
+                    state, is_subagent, _ = parse_codex_session_state(lines)
+                    tags = _rollout_event_tags(lines)
+                    print(f"    age={int(now - mtime)}s size={size} tags={tags} state={state} sub={is_subagent}")
+                except OSError as exc:
+                    print(f"    read err={exc}")
+        except Exception as exc:  # noqa: BLE001
+            print(f"  rollouts error: {exc}")
+        cx = CodexProvider()
+        print(f"  has_running_process={cx._has_running_process()}")
+        ts_cx = cx.fetch_tasks(now=now, force=True)
+        if ts_cx is None:
+            print("  stats: None")
+        else:
+            print(f"  stats: running={ts_cx.running} waiting={ts_cx.waiting} unfinished={ts_cx.unfinished}")
+
+
+if __name__ == "__main__":
+    if "--diagnose" in sys.argv[1:]:
+        run_diagnose()

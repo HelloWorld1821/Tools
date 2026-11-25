@@ -31,9 +31,11 @@ BAR_W, BAR_H = 120, 6
 
 THEMES = {
     "dark": {"bg": "#1e1f24", "fg": "#e8e8ec", "sub": "#9a9ca6", "track": "#3a3c44",
-             "ok": "#4cc38a", "warn": "#f0b429", "bad": "#ef5a5a", "info": "#58a6ff"},
+             "ok": "#4cc38a", "warn": "#f0b429", "bad": "#ef5a5a", "info": "#58a6ff",
+             "unfinished": "#b392f0"},
     "light": {"bg": "#f7f7f9", "fg": "#1f2328", "sub": "#5f6470", "track": "#d9dbe0",
-              "ok": "#1f8f55", "warn": "#b7791f", "bad": "#c53030", "info": "#0969da"},
+              "ok": "#1f8f55", "warn": "#b7791f", "bad": "#c53030", "info": "#0969da",
+              "unfinished": "#6f42c1"},
 }
 
 
@@ -151,13 +153,19 @@ class QuotaFloat:
         run_lbl = tk.Label(task_box, text="--", font=("Microsoft YaHei UI", 8),
                            bg=c["bg"], fg=c["sub"], anchor="w")
         run_lbl.pack(side="left")
-        sep_lbl = tk.Label(task_box, text="", font=("Microsoft YaHei UI", 8),
-                           bg=c["bg"], fg=c["sub"], anchor="w")
-        sep_lbl.pack(side="left")
+        sep1_lbl = tk.Label(task_box, text="", font=("Microsoft YaHei UI", 8),
+                            bg=c["bg"], fg=c["sub"], anchor="w")
+        sep1_lbl.pack(side="left")
         wait_lbl = tk.Label(task_box, text="", font=("Microsoft YaHei UI", 8),
                             bg=c["bg"], fg=c["sub"], anchor="w")
         wait_lbl.pack(side="left")
-        rows["task"] = (run_lbl, sep_lbl, wait_lbl)
+        sep2_lbl = tk.Label(task_box, text="", font=("Microsoft YaHei UI", 8),
+                            bg=c["bg"], fg=c["sub"], anchor="w")
+        sep2_lbl.pack(side="left")
+        unfin_lbl = tk.Label(task_box, text="", font=("Microsoft YaHei UI", 8),
+                             bg=c["bg"], fg=c["sub"], anchor="w")
+        unfin_lbl.pack(side="left")
+        rows["task"] = (run_lbl, sep1_lbl, wait_lbl, sep2_lbl, unfin_lbl)
         self.rows[name] = rows
 
     def _build_menu(self) -> None:
@@ -247,7 +255,7 @@ class QuotaFloat:
             except Exception as exc:  # noqa: BLE001 - 不让单个数据源拖垮界面
                 results[prov.name] = ProviderResult(prov.name, error=str(exc))
             try:
-                tasks[prov.name] = prov.fetch_tasks()
+                tasks[prov.name] = prov.fetch_tasks(force=force)
             except Exception:  # noqa: BLE001
                 tasks[prov.name] = None
         self.root.after(0, self._apply, results, tasks)
@@ -309,25 +317,36 @@ class QuotaFloat:
                 reset = fmt_duration(win.reset_in(now))
                 text.configure(text=f"{win.remaining:5.1f}%" + (f"  {reset}后重置" if reset else ""),
                                fg=c["fg"])
-            run_lbl, sep_lbl, wait_lbl = rows["task"]
+            run_lbl, sep1_lbl, wait_lbl, sep2_lbl, unfin_lbl = rows["task"]
             ts = self.tasks.get(name)
             if ts is None:
                 run_lbl.configure(text="--", fg=c["sub"], font=("Microsoft YaHei UI", 8))
-                sep_lbl.configure(text="")
+                sep1_lbl.configure(text="")
                 wait_lbl.configure(text="")
+                sep2_lbl.configure(text="")
+                unfin_lbl.configure(text="")
                 self._clear_tooltip(wait_lbl)
+                self._clear_tooltip(unfin_lbl)
             else:
                 run_font = ("Microsoft YaHei UI", 8, "bold") if ts.running > 0 else ("Microsoft YaHei UI", 8)
                 wait_font = ("Microsoft YaHei UI", 8, "bold") if ts.waiting > 0 else ("Microsoft YaHei UI", 8)
+                unfin_font = ("Microsoft YaHei UI", 8, "bold") if ts.unfinished > 0 else ("Microsoft YaHei UI", 8)
                 run_lbl.configure(text=f"运行 {ts.running}",
                                   fg=c["info"] if ts.running > 0 else c["sub"], font=run_font)
-                sep_lbl.configure(text="  ·  ", fg=c["sub"])
+                sep1_lbl.configure(text=" · ", fg=c["sub"])
                 wait_lbl.configure(text=f"待操作 {ts.waiting}",
                                    fg=c["warn"] if ts.waiting > 0 else c["sub"], font=wait_font)
+                sep2_lbl.configure(text=" · ", fg=c["sub"])
+                unfin_lbl.configure(text=f"未结束 {ts.unfinished}",
+                                    fg=c["unfinished"] if ts.unfinished > 0 else c["sub"], font=unfin_font)
                 if ts.waiting > 0 and ts.waiting_titles:
                     self._tooltip(wait_lbl, "待操作: " + " / ".join(ts.waiting_titles))
                 else:
                     self._clear_tooltip(wait_lbl)
+                if ts.unfinished > 0 and ts.unfinished_titles:
+                    self._tooltip(unfin_lbl, "未结束: " + " / ".join(ts.unfinished_titles))
+                else:
+                    self._clear_tooltip(unfin_lbl)
             if res and res.error:
                 rows["title"].configure(text=f"{name} · ⚠")
                 self._tooltip(rows["title"], res.error)

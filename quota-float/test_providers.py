@@ -11,8 +11,10 @@ from providers import (
     AntigravityProvider,
     CodexProvider,
     classify,
+    is_antigravity_server,
     is_standalone_cmdline,
     latest_rate_limits_from_lines,
+    merge_antigravity_summaries,
     parse_antigravity_quota_summary,
     parse_antigravity_status,
     parse_antigravity_tasks,
@@ -189,14 +191,26 @@ class AntigravitySummaryTest(unittest.TestCase):
 class AntigravityDiscoveryTest(unittest.TestCase):
     def test_cmdline_and_standalone(self):
         cmd = ('language_server.exe --standalone --app_data_dir antigravity '
-               '--csrf_token abc-123 --extension_server_port 51000')
+               '--csrf_token abc-123 --extension_server_port 51000 --hub-port=51234')
         self.assertTrue(is_standalone_cmdline(cmd))
         self.assertFalse(is_standalone_cmdline('language_server.exe --other'))
         self.assertEqual(parse_cmdline_args(cmd), {
             "csrf_token": "abc-123",
             "extension_server_port": "51000",
             "app_data_dir": "antigravity",
+            "hub_port": "51234",
         })
+        self.assertTrue(is_antigravity_server("language_server.exe", "language_server.exe --standalone"))
+        self.assertTrue(is_antigravity_server(
+            "language_server_windows_x64.exe",
+            "language_server_windows_x64.exe --subclient_type ide --app_data_dir antigravity",
+        ))
+        self.assertTrue(is_antigravity_server("agy.exe", "agy.exe --hub --hub-port 51234"))
+        self.assertFalse(is_antigravity_server("agy.exe", "agy.exe --version"))
+        self.assertFalse(is_antigravity_server(
+            "language_server.exe",
+            "language_server.exe --standalone --enable_lsp",
+        ))
 
     def test_resolve_daemon_credential(self):
         inline = resolve_daemon_credential("language_server --csrf_token=inline-tok", 99)
@@ -415,9 +429,12 @@ class AntigravityRpcTest(unittest.TestCase):
 
 
 class AntigravityTasksTest(unittest.TestCase):
-    def test_parse_antigravity_tasks(self):
+    def test_parse_antigravity_tasks_and_unfinished(self):
         data = {"trajectorySummaries": {
             "root-run": {"summary": "Build widget", "status": "CASCADE_RUN_STATUS_RUNNING"},
+            "root-num-run": {"summary": "Numeric running", "status": 2},
+            "root-num-wait": {"summary": "Numeric waiting", "status": 3},
+            "root-num-idle": {"summary": "Numeric idle", "status": 1},
             "root-wait-step": {
                 "summary": "Approve shell cmd",
                 "status": "CASCADE_RUN_STATUS_RUNNING",
@@ -431,6 +448,13 @@ class AntigravityTasksTest(unittest.TestCase):
                 "summary": "Done task",
                 "status": "CASCADE_RUN_STATUS_IDLE",
                 "waitingSteps": [{"status": "CORTEX_STEP_STATUS_DONE"}],
+            },
+            "root-paused": {"summary": "小论文初稿", "status": "CASCADE_RUN_STATUS_PAUSED"},
+            "root-children": {"summary": "后台待续", "status": "CASCADE_RUN_STATUS_IDLE", "hasActiveChildren": True},
+            "root-not-idle-with-sub": {"summary": "子代理运行中", "status": "CASCADE_RUN_STATUS_IDLE", "notFullyIdle": True},
+            "sub-of-not-idle": {
+                "status": "CASCADE_RUN_STATUS_RUNNING",
+                "trajectoryMetadata": {"rootConversationId": "root-not-idle-with-sub"},
             },
             "root-parent": {"summary": "Parent chat", "status": "CASCADE_RUN_STATUS_IDLE"},
             "sub-running": {
@@ -465,39 +489,65 @@ class AntigravityTasksTest(unittest.TestCase):
             "arch-1": {"summary": "Archived", "status": "CASCADE_RUN_STATUS_ARCHIVED"},
         }}
         ts = parse_antigravity_tasks(data)
-        self.assertEqual(ts.running, 2)  # root-run + root-parent (via sub-running)
-        self.assertEqual(ts.waiting, 3)  # root-wait-step + root-wait-status + root-parent-wait
-        self.assertEqual(ts.waiting_titles, ["Approve shell cmd", "Needs answer", "Subagent needs input"])
+        self.assertEqual(ts.running, 4)  # root-run + root-num-run + root-not-idle-with-sub + root-parent
+        self.assertEqual(ts.waiting, 4)  # root-num-wait + root-wait-step + root-wait-status + root-parent-wait
+        self.assertEqual(ts.unfinished, 2)  # root-paused + root-children
+        self.assertEqual(
+            ts.waiting_titles,
+            ["Numeric waiting", "Approve shell cmd", "Needs answer", "Subagent needs input"],
+        )
+        self.assertEqual(ts.unfinished_titles, ["小论文初稿", "后台待续"])
 
-    def test_fetch_tasks_caching_and_invalidation(self):
+    def test_merge_antigravity_summaries_multi_workspace(self):
+        srv_tools = {
+            "c-tools": {"summary": "tools", "status": "CASCADE_RUN_STATUS_IDLE", "stepCount": 4},
+            "c-shared": {"summary": "Shared", "status": "CASCADE_RUN_STATUS_RUNNING", "stepCount": 5},
+        }
+        srv_thesis = {
+            "c-thesis": {"summary": "小论文", "status": "CASCADE_RUN_STATUS_RUNNING", "stepCount": 8},
+            "C-SHARED": {"summary": "Shared", "status": "CASCADE_RUN_STATUS_WAITING_FOR_USER", "stepCount": 6},
+        }
+        ts = parse_antigravity_tasks({"trajectorySummaries": merge_antigravity_summaries([srv_tools, srv_thesis])})
+        self.assertEqual((ts.running, ts.waiting, ts.unfinished), (1, 1, 0))
+        self.assertEqual(ts.waiting_titles, ["Shared"])
+
+    def test_fetch_tasks_multi_server_caching_and_invalidation(self):
         scans = {"count": 0}
-        port_box = {"port": 55001, "csrf": "tok-1"}
+        port_box = {"p1": 55001, "p2": 55010, "csrf": "tok-1"}
         calls = []
 
         prov = AntigravityProvider()
 
         def find_servers():
             scans["count"] += 1
-            return [(100 + scans["count"], "language_server.exe --standalone", {})]
+            return [
+                (100 + scans["count"], "language_server.exe --standalone", {}),
+                (200 + scans["count"], f"agy.exe --hub --hub-port {port_box['p2']}", {"hub_port": str(port_box["p2"])}),
+            ]
 
         prov._find_servers = find_servers
-        prov._read_log_ports = lambda: [port_box["port"]]
-        prov._listening_ports = lambda _pid, preferred_port=None: [port_box["port"]]
+        prov._read_log_ports = lambda: [port_box["p1"]]
+        prov._listening_ports = lambda pid, preferred_port=None: [
+            port_box["p1"] if pid < 200 else port_box["p2"]
+        ]
         prov._resolve_daemon = lambda _cmd, _pid, _ports: {
-            "csrf": port_box["csrf"], "http_port": port_box["port"], "https_port": None,
+            "csrf": port_box["csrf"], "http_port": None, "https_port": None,
         }
 
         mode = {"behavior": "ok"}
 
         def handler(req):
-            calls.append((req.full_url, {k.lower(): v for k, v in req.header_items()},
-                          json.loads(req.data.decode("utf-8"))))
+            calls.append((req.full_url, json.loads(req.data.decode("utf-8"))))
             if mode["behavior"] == "conn_err" and ":55001" in req.full_url:
                 raise OSError("connection refused")
             if mode["behavior"] == "401" and req.headers.get("X-codeium-csrf-token") == "tok-2":
                 raise urllib.error.HTTPError(req.full_url, 401, "Unauthorized", {}, None)
+            if f":{port_box['p2']}" in req.full_url:
+                return json.dumps({"trajectorySummaries": {
+                    "thesis": {"summary": "小论文", "status": "CASCADE_RUN_STATUS_RUNNING"},
+                }}).encode("utf-8")
             return json.dumps({"trajectorySummaries": {
-                "a": {"status": "CASCADE_RUN_STATUS_RUNNING"},
+                "a": {"status": "CASCADE_RUN_STATUS_IDLE"},
                 "b": {"summary": "Confirm?", "status": "CASCADE_RUN_STATUS_WAITING_FOR_USER"},
             }}).encode("utf-8")
 
@@ -506,27 +556,32 @@ class AntigravityTasksTest(unittest.TestCase):
                    side_effect=AntigravityRpcTest._make_build_opener(handler, recorded)):
             ts1 = prov.fetch_tasks()
             ts2 = prov.fetch_tasks()
-            self.assertEqual((ts1.running, ts1.waiting), (1, 1))
-            self.assertEqual((ts2.running, ts2.waiting), (1, 1))
+            self.assertEqual((ts1.running, ts1.waiting, ts1.unfinished), (1, 1, 0))
+            self.assertEqual((ts2.running, ts2.waiting, ts2.unfinished), (1, 1, 0))
             self.assertEqual(scans["count"], 1)  # 缓存生效，未重复扫描进程
-            self.assertEqual(calls[0][2], {"excludeSubtrajectories": False})
+            self.assertEqual(calls[0][1], {"excludeSubtrajectories": False})
             self.assertTrue(calls[0][0].endswith("/GetAllCascadeTrajectories"))
 
+            # force=True 立即触发重新发现
+            ts_force = prov.fetch_tasks(force=True)
+            self.assertEqual((ts_force.running, ts_force.waiting), (1, 1))
+            self.assertEqual(scans["count"], 2)
+
             # 连接失败触发失效并重连新端口
-            port_box["port"] = 55002
+            port_box["p1"] = 55002
             port_box["csrf"] = "tok-2"
             mode["behavior"] = "conn_err"
             ts3 = prov.fetch_tasks()
             self.assertEqual((ts3.running, ts3.waiting), (1, 1))
-            self.assertEqual(scans["count"], 2)
+            self.assertEqual(scans["count"], 3)
 
             # 401 同样清除缓存并重新发现新 token
-            port_box["port"] = 55003
+            port_box["p1"] = 55003
             port_box["csrf"] = "tok-3"
             mode["behavior"] = "401"
             ts4 = prov.fetch_tasks()
             self.assertEqual((ts4.running, ts4.waiting), (1, 1))
-            self.assertEqual(scans["count"], 3)
+            self.assertEqual(scans["count"], 4)
 
 
 class CodexTasksTest(unittest.TestCase):
@@ -541,13 +596,46 @@ class CodexTasksTest(unittest.TestCase):
         ))
         self.assertEqual((st, sub, title), ("running", False, "Refactor module"))
 
-        # task_complete / turn_aborted -> idle
-        for end_ev in ("task_complete", "turn_aborted"):
-            st, _, _ = parse_codex_session_state(lines_from(
-                {"type": "event_msg", "payload": {"type": "task_started"}},
-                {"type": "event_msg", "payload": {"type": end_ev}},
-            ))
-            self.assertEqual(st, "idle")
+        # task_complete -> idle, turn_aborted -> aborted
+        st_done, _, _ = parse_codex_session_state(lines_from(
+            {"type": "event_msg", "payload": {"type": "task_started"}},
+            {"type": "event_msg", "payload": {"type": "task_complete"}},
+        ))
+        self.assertEqual(st_done, "idle")
+
+        st_aborted, _, _ = parse_codex_session_state(lines_from(
+            {"type": "event_msg", "payload": {"type": "task_started"}},
+            {"type": "event_msg", "payload": {"type": "turn_aborted"}},
+        ))
+        self.assertEqual(st_aborted, "aborted")
+
+        # 尾部截断（无 task_started，仅含正在进行的 reasoning / function_call / exec_command_begin）-> running
+        for item in (
+            {"type": "response_item", "payload": {"type": "reasoning"}},
+            {"type": "response_item", "payload": {"type": "function_call", "name": "shell", "call_id": "x1"}},
+            {"type": "event_msg", "payload": {"type": "exec_command_begin"}},
+        ):
+            st_tail, _, _ = parse_codex_session_state(lines_from(item))
+            self.assertEqual(st_tail, "running")
+
+        # 非包装格式 turn_context / task_started / task_complete 与 assistant final_answer
+        st_unwrapped, _, _ = parse_codex_session_state(lines_from(
+            {"type": "turn_context", "turn_id": "1"},
+            {"type": "agent_message", "content": "working"},
+        ))
+        self.assertEqual(st_unwrapped, "running")
+
+        st_unwrapped_done, _, _ = parse_codex_session_state(lines_from(
+            {"type": "task_started"},
+            {"type": "task_complete"},
+        ))
+        self.assertEqual(st_unwrapped_done, "idle")
+
+        st_final, _, _ = parse_codex_session_state(lines_from(
+            {"type": "event_msg", "payload": {"type": "task_started"}},
+            {"type": "response_item", "payload": {"type": "message", "role": "assistant", "phase": "final_answer"}},
+        ))
+        self.assertEqual(st_final, "idle")
 
         # exec_approval_request -> waiting, then exec_command_begin -> running
         st, _, _ = parse_codex_session_state(lines_from(
@@ -595,36 +683,52 @@ class CodexTasksTest(unittest.TestCase):
         self.assertTrue(parse_tasklist_has_codex(csv_with_codex))
         self.assertFalse(parse_tasklist_has_codex(csv_without))
 
-    def test_fetch_tasks_with_codex_home(self):
+    def test_fetch_tasks_with_codex_home_and_unfinished(self):
         now = 1_800_000_000.0
         with tempfile.TemporaryDirectory() as tmp:
-            day_dir = os.path.join(tmp, "sessions", "2026", "11", "25")
-            os.makedirs(day_dir)
+            old_day_dir = os.path.join(tmp, "sessions", "2026", "10", "01")
+            cur_day_dir = os.path.join(tmp, "sessions", "2026", "11", "25")
+            os.makedirs(old_day_dir)
+            os.makedirs(cur_day_dir)
 
-            def write_rollout(name, age, events):
-                p = os.path.join(day_dir, name)
+            def write_rollout(directory, name, age, events):
+                p = os.path.join(directory, name)
                 with open(p, "w", encoding="utf-8") as f:
                     for ev in events:
                         f.write(json.dumps(ev) + "\n")
                 os.utime(p, (now - age, now - age))
 
-            write_rollout("rollout-run.jsonl", 30, [
+            # 跨日期恢复的旧目录会话（今天修改），依然应被扫描到
+            write_rollout(old_day_dir, "rollout-thesis.jsonl", 30, [
+                {"type": "event_msg", "payload": {"type": "user_message", "message": "小论文修订"}},
                 {"type": "event_msg", "payload": {"type": "task_started"}},
             ])
-            write_rollout("rollout-wait.jsonl", 120, [
+            write_rollout(cur_day_dir, "rollout-wait.jsonl", 120, [
                 {"type": "event_msg", "payload": {"type": "user_message", "message": "Allow rm?"}},
                 {"type": "event_msg", "payload": {"type": "exec_approval_request"}},
             ])
-            write_rollout("rollout-sub-run.jsonl", 20, [
+            write_rollout(cur_day_dir, "rollout-sub-run.jsonl", 20, [
                 {"type": "session_meta", "payload": {"source": {"subagent": {"id": "1"}}}},
                 {"type": "event_msg", "payload": {"type": "task_started"}},
             ])
-            write_rollout("rollout-sub-wait.jsonl", 40, [
+            write_rollout(cur_day_dir, "rollout-sub-wait.jsonl", 40, [
                 {"type": "session_meta", "payload": {"source": {"thread_spawn": {"id": "2"}}}},
                 {"type": "event_msg", "payload": {"type": "user_message", "message": "Subagent ask"}},
                 {"type": "event_msg", "payload": {"type": "request_user_input"}},
             ])
-            write_rollout("rollout-stale.jsonl", 5000, [
+            # 超过 10 分钟仍在 turn 中 -> 未结束
+            write_rollout(cur_day_dir, "rollout-open-stale.jsonl", 5000, [
+                {"type": "event_msg", "payload": {"type": "user_message", "message": "Long draft"}},
+                {"type": "event_msg", "payload": {"type": "task_started"}},
+            ])
+            # 24h 内被中断 -> 未结束
+            write_rollout(cur_day_dir, "rollout-aborted.jsonl", 600, [
+                {"type": "event_msg", "payload": {"type": "user_message", "message": "Interrupted task"}},
+                {"type": "event_msg", "payload": {"type": "task_started"}},
+                {"type": "event_msg", "payload": {"type": "turn_aborted"}},
+            ])
+            # 超过 24h -> 忽略
+            write_rollout(cur_day_dir, "rollout-ancient.jsonl", 30 * 3600, [
                 {"type": "event_msg", "payload": {"type": "task_started"}},
             ])
 
@@ -632,13 +736,29 @@ class CodexTasksTest(unittest.TestCase):
             prov._has_running_process = lambda: True
             with patch.dict(os.environ, {"CODEX_HOME": tmp}):
                 ts = prov.fetch_tasks(now=now)
-                self.assertEqual((ts.running, ts.waiting), (1, 2))
+                self.assertEqual((ts.running, ts.waiting, ts.unfinished), (1, 2, 2))
                 self.assertEqual(ts.waiting_titles, ["Subagent ask", "Allow rm?"])
+                self.assertEqual(ts.unfinished_titles, ["Interrupted task", "Long draft"])
 
-                # 若系统已无 codex 进程，清理异常退出的残留会话数
+                # 活跃刷新（age <= 180s）即使未检测到 codex.exe 进程也不清零
                 prov._has_running_process = lambda: False
-                ts_dead = prov.fetch_tasks(now=now)
-                self.assertEqual((ts_dead.running, ts_dead.waiting), (0, 0))
+                ts_fresh = prov.fetch_tasks(now=now)
+                self.assertEqual((ts_fresh.running, ts_fresh.waiting, ts_fresh.unfinished), (1, 2, 2))
+
+            # 非新鲜（age = 300s > 180s）且无 codex 进程时降级归入未结束
+            with tempfile.TemporaryDirectory() as tmp2:
+                d2 = os.path.join(tmp2, "sessions", "2026", "11", "25")
+                os.makedirs(d2)
+                write_rollout(d2, "rollout-old-open.jsonl", 300, [
+                    {"type": "event_msg", "payload": {"type": "user_message", "message": "Dangling session"}},
+                    {"type": "event_msg", "payload": {"type": "task_started"}},
+                ])
+                prov2 = CodexProvider()
+                prov2._has_running_process = lambda: False
+                with patch.dict(os.environ, {"CODEX_HOME": tmp2}):
+                    ts_demoted = prov2.fetch_tasks(now=now)
+                    self.assertEqual((ts_demoted.running, ts_demoted.waiting, ts_demoted.unfinished), (0, 0, 1))
+                    self.assertEqual(ts_demoted.unfinished_titles, ["Dangling session"])
 
 
 if __name__ == "__main__":
